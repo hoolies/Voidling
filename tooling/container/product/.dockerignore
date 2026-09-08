@@ -1,0 +1,5 @@
+# Product Containerfiles do not COPY the rest of this directory.
+# Keep the send context to the xbps.d snippets only.
+*
+!xbps.d
+!xbps.d/**

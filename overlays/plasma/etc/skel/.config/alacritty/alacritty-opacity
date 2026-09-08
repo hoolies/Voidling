@@ -1,0 +1,155 @@
+#!/usr/bin/env sh
+# alacritty-opacity — change Alacritty window opacity via IPC.
+
+set -eu
+export LC_ALL=C
+unalias -a 2>/dev/null || true
+unset -f alacritty sed awk 2>/dev/null || true
+
+readonly PROGNAME="${0##*/}"
+readonly OPAQUE=1
+readonly TRANSLUCENT=0.67
+readonly STEP=0.05
+readonly MIN_OPACITY=0.05
+readonly MAX_OPACITY=1
+
+usage() {
+    cat <<EOF
+Usage: $PROGNAME [OPTION]... [COMMAND]
+Change Alacritty window opacity without rewriting the config file.
+
+Mandatory arguments to long options are mandatory for short options too.
+
+  -h, --help            display this help and exit
+
+If COMMAND is omitted, toggle. COMMAND may be:
+
+  toggle                switch between $OPAQUE and $TRANSLUCENT
+  up                    increase opacity by $STEP
+  down                  decrease opacity by $STEP
+  reset                 set opacity to $TRANSLUCENT
+EOF
+}
+
+unrecognized_option() {
+    printf '%s: unrecognized option %s\n' "$PROGNAME" "$1" >&2
+    printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+}
+
+unrecognized_operand() {
+    printf '%s: unrecognized operand %s\n' "$PROGNAME" "$1" >&2
+    printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+}
+
+extra_operand() {
+    printf '%s: extra operand %s\n' "$PROGNAME" "$1" >&2
+    printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+}
+
+parse_args() {
+    action=toggle
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                unrecognized_option "$1"
+                exit 2
+                ;;
+            *)
+                break
+                ;;
+        esac
+        shift
+    done
+    if [ "$#" -gt 0 ]; then
+        case "$1" in
+            toggle | up | down | reset)
+                action=$1
+                ;;
+            *)
+                unrecognized_operand "$1"
+                exit 2
+                ;;
+        esac
+        shift
+    fi
+    if [ "$#" -gt 0 ]; then
+        extra_operand "$1"
+        exit 2
+    fi
+}
+
+require_alacritty() {
+    if ! command -v alacritty >/dev/null 2>&1; then
+        printf '%s: alacritty: command not found\n' "$PROGNAME" >&2
+        exit 1
+    fi
+}
+
+read_opacity() {
+    cfg=$(alacritty msg get-config -w -1) || {
+        printf '%s: failed to read Alacritty runtime config\n' "$PROGNAME" >&2
+        exit 1
+    }
+    opacity=$(printf '%s\n' "$cfg" | sed -n 's/.*"opacity":\([0-9.][0-9.]*\).*/\1/p')
+    if [ -z "$opacity" ]; then
+        printf '%s: could not parse opacity from Alacritty\n' "$PROGNAME" >&2
+        exit 1
+    fi
+}
+
+choose_opacity() {
+    case "$action" in
+        toggle)
+            if awk -v o="$opacity" -v a="$OPAQUE" 'BEGIN { exit (o + 0 == a + 0) ? 0 : 1 }'; then
+                new_opacity=$TRANSLUCENT
+            else
+                new_opacity=$OPAQUE
+            fi
+            ;;
+        up)
+            new_opacity=$(awk -v o="$opacity" -v d="$STEP" -v lo="$MIN_OPACITY" -v hi="$MAX_OPACITY" 'BEGIN {
+                n = o + d
+                if (n > hi) n = hi
+                if (n < lo) n = lo
+                printf "%.2f", n
+            }')
+            ;;
+        down)
+            new_opacity=$(awk -v o="$opacity" -v d="$STEP" -v lo="$MIN_OPACITY" -v hi="$MAX_OPACITY" 'BEGIN {
+                n = o - d
+                if (n > hi) n = hi
+                if (n < lo) n = lo
+                printf "%.2f", n
+            }')
+            ;;
+        reset)
+            new_opacity=$TRANSLUCENT
+            ;;
+    esac
+}
+
+apply_opacity() {
+    alacritty msg config -w -1 "window.opacity=${new_opacity}" || {
+        printf '%s: failed to set window.opacity=%s\n' "$PROGNAME" "$new_opacity" >&2
+        exit 1
+    }
+    printf '%s\n' "$new_opacity"
+}
+
+main() {
+    parse_args "$@"
+    require_alacritty
+    read_opacity
+    choose_opacity
+    apply_opacity
+}
+
+main "$@"

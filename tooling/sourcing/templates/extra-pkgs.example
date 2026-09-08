@@ -1,0 +1,14 @@
+# Extra PKGS snippet for compose-rootfs.sh.
+# One XBPS package / template name per line. Comments and blank lines are ignored.
+#
+# Compose auto-includes this file from <OUT_DIR>/sourcing/generation/extra-pkgs
+# unless SOURCING_EXTRAS=0. Official Void .xbps stay the default; names listed
+# here are opt-in extras.
+#
+# Custom .xbps from xbps-src land in:
+#   out/cache/void-packages/hostdir/binpkgs
+# Compose adds -R for that directory (or SOURCING_BINPKGS) before official
+# repos when it exists, so a same-name sourced package replaces the official
+# one.
+
+# hello

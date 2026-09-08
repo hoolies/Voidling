@@ -1,0 +1,35 @@
+# Voidling sourcing image: xbps-src + export helpers.
+# Isolated from tooling/container (compose / OSTree builder).
+#
+# Build (from repo root):
+#   podman build -t voidling-sourcing:local -f tooling/sourcing/Containerfile tooling/sourcing
+#
+# Optional: reuse the compose builder as the base (if it already exists):
+#   podman build --build-arg BASE=voidling-builder:local \
+#     -t voidling-sourcing:local -f tooling/sourcing/Containerfile tooling/sourcing
+
+ARG BASE=docker.io/voidlinux/voidlinux:latest
+FROM ${BASE}
+
+# Pin repos only when starting from the official Void image. The compose
+# builder already ships /etc/xbps.d/00-voidling-repos.conf.
+RUN if [ ! -f /etc/xbps.d/00-voidling-repos.conf ]; then \
+        mkdir -p /etc/xbps.d && \
+        printf '%s\n' \
+            "repository=https://repo-default.voidlinux.org/current" \
+            "repository=https://repo-default.voidlinux.org/current/nonfree" \
+            >/etc/xbps.d/00-voidling-repos.conf && \
+        rm -f /usr/share/xbps.d/00-repository-main.conf; \
+    fi
+
+# xbps-src itself lives in the void-packages clone (not an XBPS package).
+# binary-bootstrap inside that clone installs the chroot toolchain.
+RUN XBPS_NONINTERACTIVE=1 xbps-install -Suy xbps ca-certificates && \
+    XBPS_NONINTERACTIVE=1 xbps-install -Sy \
+        bash coreutils findutils gawk grep sed util-linux git curl \
+        xbps tar gzip xz && \
+    xbps-reconfigure -fa && \
+    xbps-remove -Ooy && \
+    rm -rf /var/cache/xbps
+
+WORKDIR /work

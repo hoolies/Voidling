@@ -1,0 +1,43 @@
+# Voidling product image: minimal (runtime / Distrobox / FROM base).
+#
+# This is not the builder image (see ../Dockerfile). Package policy matches
+# tooling/compose/compose-minimal-rootfs.sh: base-container + certs, dash as
+# /bin/sh, ignore glibc-locales/nvi/which. Official Void .xbps only.
+# Do not COPY out/rootfs-*; this image is policy-aligned, not a rootfs import.
+#
+# runit may be present via base-container; it is PID 1 on the Voidling *host*,
+# not the default PID 1 of this image (CMD is /bin/sh).
+
+ARG VOID_BASE=docker.io/voidlinux/voidlinux:latest
+FROM ${VOID_BASE}
+
+LABEL org.opencontainers.image.title="Voidling minimal" \
+      org.opencontainers.image.description="Product/runtime image: Voidling minimal policy (base-container + certs; dash /bin/sh)" \
+      voidling.variant="minimal" \
+      voidling.role="product"
+
+# Stable repo host (avoid mirror/cert mismatches). Drop the image-shipped
+# alpha.de.repo.voidlinux.org main repo so xbps does not contact it.
+COPY xbps.d/00-voidling-repos.conf /etc/xbps.d/00-voidling-repos.conf
+COPY xbps.d/10-voidling-ignore.conf /etc/xbps.d/10-voidling-ignore.conf
+RUN rm -f /usr/share/xbps.d/00-repository-main.conf
+
+# Update xbps first (base image xbps can be too old for current repodata),
+# then apply the minimal seed. ignorepkg is already in place.
+RUN XBPS_NONINTERACTIVE=1 xbps-install -Suy xbps && \
+    XBPS_NONINTERACTIVE=1 xbps-install -Sy base-container ca-certificates && \
+    xbps-reconfigure -fa && \
+    xbps-remove -Ooy && \
+    rm -rf /var/cache/xbps
+
+# Official FROM image may already contain ignored packages; drop them so the
+# running image matches the compose ignore list.
+RUN for pkg in glibc-locales nvi which; do \
+        if xbps-query -p pkgver "${pkg}" >/dev/null 2>&1; then \
+            XBPS_NONINTERACTIVE=1 xbps-remove -y "${pkg}"; \
+        fi; \
+    done && \
+    xbps-remove -Ooy && \
+    rm -rf /var/cache/xbps
+
+CMD ["/bin/sh"]

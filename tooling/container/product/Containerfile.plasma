@@ -1,0 +1,66 @@
+# Voidling product image: plasma (optional, heavy).
+#
+# FROM the minimal product image, then the extra packages from
+# tooling/compose/compose-plasma-rootfs.sh. The plasma *overlay* (Zen Browser,
+# skel, mimeapps) is a host-desktop concern and is not applied here.
+#
+# Prefer voidling-minimal:local for Distrobox. Build this target only when you
+# want a mutable Void userland that already has the Plasma/desktop package set.
+
+ARG MINIMAL_IMAGE=voidling-minimal:local
+FROM ${MINIMAL_IMAGE}
+
+LABEL org.opencontainers.image.title="Voidling plasma" \
+      org.opencontainers.image.description="Product/runtime image: Voidling plasma package set on the minimal product base" \
+      voidling.variant="plasma" \
+      voidling.role="product"
+
+# Extra packages only (base-container + ca-certificates come from minimal).
+# Keep this list aligned with tooling/compose/compose-plasma-rootfs.sh.
+RUN XBPS_NONINTERACTIVE=1 xbps-install -Sy \
+        kde-plasma \
+        kde-baseapps \
+        dolphin \
+        sddm \
+        mesa-dri \
+        xf86-input-synaptics \
+        xf86-input-libinput \
+        zsh \
+        bash \
+        vim \
+        tmux \
+        git \
+        fd \
+        fzf \
+        bat \
+        tree \
+        yazi \
+        man-db \
+        man-pages \
+        less \
+        NetworkManager \
+        flatpak \
+        xdg-desktop-portal \
+        xdg-desktop-portal-kde \
+        pipewire \
+        wireplumber \
+        wl-clipboard \
+        dejavu-fonts-ttf \
+        noto-fonts-ttf \
+        nerd-fonts \
+        font-hack-ttf \
+        xdg-user-dirs \
+        xdg-utils \
+        sudo \
+        konsole \
+        alacritty \
+        helix \
+        conky \
+        glow \
+        fuzzel \
+        bluez && \
+    xbps-reconfigure -fa && \
+    xbps-remove -Ooy && \
+    rm -rf /var/cache/xbps
+
+CMD ["/bin/sh"]

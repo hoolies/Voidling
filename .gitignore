@@ -1,0 +1,22 @@
+# Compose, image, OSTree, installer, and sourcing outputs.
+# Rootfs trees, live ISOs, qcow2 disks, ostree-repo, install-staging, caches.
+/out/
+
+# Images if a builder writes them outside out/
+*.iso
+*.qcow2
+*.squashfs
+
+# Editor and OS junk
+*~
+.*.swp
+.*.swo
+.DS_Store
+
+# Python bytecode (skel espanso scripts, sourcing helpers)
+__pycache__/
+*.py[cod]
+
+# Plasma skel: clipse runtime log (keep config.json / theme)
+overlays/plasma/etc/skel/.config/clipse/clipse.log
+overlays/plasma/etc/skel/.config/shell/zshrc.1

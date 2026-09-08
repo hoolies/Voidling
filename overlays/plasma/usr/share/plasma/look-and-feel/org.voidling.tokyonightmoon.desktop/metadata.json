@@ -1,0 +1,16 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Voidling"
+            }
+        ],
+        "Category": "",
+        "Description": "Tokyo Night Moon for Voidling Plasma. Generated for KDE; not imported from XFCE.",
+        "Id": "org.voidling.tokyonightmoon.desktop",
+        "License": "MIT",
+        "Name": "Tokyo Night Moon",
+        "Website": "https://github.com/hoolies"
+    }
+}

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Wine Windows Program Loader
+Comment=Run Windows applications (Voidling Fenestration)
+Exec=wine start /unix %f
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+Categories=System;Emulator;
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/x-msi;application/x-ms-shortcut;

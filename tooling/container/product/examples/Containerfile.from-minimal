@@ -1,0 +1,13 @@
+# Example: derive your own image from the Voidling product base.
+# Build the base first:
+#   bash tooling/container/build-product-image.sh
+# Then:
+#   podman build -t myapp:local -f tooling/container/product/examples/Containerfile.from-minimal .
+
+FROM voidling-minimal:local
+
+# Layers here stay inside the image. They do not mutate the immutable host,
+# where xbps is read-only. Official Void .xbps only.
+RUN XBPS_NONINTERACTIVE=1 xbps-install -Sy git
+
+CMD ["/bin/sh"]

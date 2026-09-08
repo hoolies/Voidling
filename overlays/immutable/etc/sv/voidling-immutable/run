@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# One-shot: enforce immutable mounts, then pause so runit keeps the service up.
+set -eu
+unalias -a 2>/dev/null || true
+
+/usr/lib/voidling/mount-immutable.sh
+exec pause

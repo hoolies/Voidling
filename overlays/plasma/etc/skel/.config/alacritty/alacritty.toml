@@ -1,0 +1,143 @@
+[general]
+import = ["tokyonight_moon.toml"]
+
+[font]
+size = 14.0
+
+[font.italic]
+family = "Hack Nerd Font Mono"
+style = "Italic"
+
+[font.normal]
+family = "Hack Nerd Font Mono"
+style = "Regular"
+
+[font.bold]
+family = "Hack Nerd Font Mono"
+style = "Bold"
+
+[font.bold_italic]
+family = "Hack Nerd Font Mono"
+style = "Bold Italic"
+
+[window]
+decorations = "None"
+opacity = 0.67
+startup_mode = "Fullscreen"
+padding = { x = 6, y = 6 }
+dynamic_padding = true
+
+[scrolling]
+history = 50000
+
+[mouse]
+hide_when_typing = true
+bindings = [
+    { mouse = "WheelUp", mods = "Control", action = "IncreaseFontSize" },
+    { mouse = "WheelDown", mods = "Control", action = "DecreaseFontSize" },
+    { mouse = "WheelUp", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "up",
+    ] } },
+    { mouse = "WheelDown", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "down",
+    ] } },
+]
+
+[keyboard]
+bindings = [
+    { key = "Return", mods = "Control|Shift", action = "SpawnNewInstance" },
+    { key = "Equals", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "up",
+    ] } },
+    { key = "Plus", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "up",
+    ] } },
+    { key = "NumpadAdd", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "up",
+    ] } },
+    { key = "Minus", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "down",
+    ] } },
+    { key = "_", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "down",
+    ] } },
+    { key = "_", mods = "Control", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "down",
+    ] } },
+    { key = "0", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "reset",
+    ] } },
+    { key = ")", mods = "Control|Shift", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "reset",
+    ] } },
+    { key = ")", mods = "Control", command = { program = "sh", args = [
+        "-c",
+        "exec \"$HOME/.config/alacritty/alacritty-opacity\" \"$1\"",
+        "opacity",
+        "reset",
+    ] } },
+]
+
+[[hints.enabled]]
+command = "xdg-open"
+hyperlinks = true
+post_processing = true
+persist = false
+mouse = { enabled = true, mods = "Control" }
+binding = { key = "O", mods = "Control|Shift" }
+regex = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)[^\u0000-\u001F\u007F-\u009F<>\"\\s{-}\\^⟨⟩`\\\\]+"
+
+[[hints.enabled]]
+regex = '(?:(?:\./|\.\./|/)(?:[A-Za-z0-9._+-]+/)*|[A-Za-z0-9._+-]+/)?[A-Za-z0-9._+-]+\.(?:rs|go|c|h|hh|cc|cpp|cxx|hpp|py|js|mjs|cjs|ts|tsx|jsx|toml|sh|bash|zsh|lua|vim|nix|java|kt|kts|swift|rb|php|zig|json|yml|yaml|md|txt|log|ex|exs|hs|ml|conf|cfg|ini|mk|s|S|asm):[0-9]+:[0-9]+'
+command = { program = "sh", args = [
+    "-c",
+    "m=$1; f=${m%%:*}; r=${m#*:}; l=${r%%:*}; c=${r##*:}; exec nvim -- \"$f\" \"+call cursor($l, $c)\"",
+    "open-at",
+] }
+mouse = { enabled = true, mods = "Control" }
+
+[bell]
+animation = "Linear"
+duration = 1
+color = "#FFFFFF"
+
+[selection]
+save_to_clipboard = true
+
+[cursor]
+style = { shape = "Block", blinking = "Always" }
+blink_timeout = 5
+unfocused_hollow = true
+
+[colors]
+transparent_background_colors = true

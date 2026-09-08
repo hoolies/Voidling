@@ -1,0 +1,11 @@
+[Default Applications]
+application/x-ms-dos-executable=wine-program-loader.desktop
+application/x-msdownload=wine-program-loader.desktop
+application/x-msi=wine-program-loader.desktop
+application/x-ms-shortcut=wine-program-loader.desktop
+
+[Added Associations]
+application/x-ms-dos-executable=wine-program-loader.desktop;
+application/x-msdownload=wine-program-loader.desktop;
+application/x-msi=wine-program-loader.desktop;
+application/x-ms-shortcut=wine-program-loader.desktop;

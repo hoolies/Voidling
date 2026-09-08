@@ -1,0 +1,5 @@
+# Fenestration is present in this immutable generation.
+# Detect: test -e /etc/voidling/fenestration  (or /usr/etc after compose seal)
+enabled=1
+variant=plasma-fenestration
+steam=0

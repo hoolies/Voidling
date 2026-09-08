@@ -1,0 +1,21 @@
+# Sketch: OCI image wrapping a sourced Void package.
+# Built .xbps files are copied from the void-packages hostdir (not the live host).
+#
+#   podman build -t localhost/voidling-sourced-TEMPLATE:local \
+#     -f out/sourcing/oci/Containerfile out/sourcing/oci
+#   podman save --format oci-archive -o out/sourcing/oci/TEMPLATE.oci.tar \
+#     localhost/voidling-sourced-TEMPLATE:local
+#
+# Or with buildah:
+#   buildah bud -t localhost/voidling-sourced-TEMPLATE:local \
+#     -f out/sourcing/oci/Containerfile out/sourcing/oci
+
+FROM docker.io/voidlinux/voidlinux:latest
+
+COPY binpkgs /tmp/binpkgs
+
+# TEMPLATE is replaced by source-package.sh when it writes the real file.
+ARG SOURCED_PKG=TEMPLATE
+RUN XBPS_NONINTERACTIVE=1 xbps-install -Suy xbps ca-certificates && \
+    XBPS_NONINTERACTIVE=1 xbps-install -y -R /tmp/binpkgs "$SOURCED_PKG" && \
+    rm -rf /tmp/binpkgs /var/cache/xbps

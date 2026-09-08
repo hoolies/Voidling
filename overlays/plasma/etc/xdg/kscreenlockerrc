@@ -1,0 +1,5 @@
+[Greeter]
+Theme=org.kde.breeze.desktop
+
+[Greeter][Wallpaper][org.kde.image][General]
+Image[$e]=file://$HOME/.config/Backgrounds/Black-void.png

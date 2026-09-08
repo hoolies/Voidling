@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# grub.d drop-in: emit GRUB menuentries for each Voidling OSTree deployment.
+set -euo pipefail
+
+unalias -a 2>/dev/null || true
+unset -f mkdir ostree printf cat ls find stat readlink basename dirname \
+    sort grep sed mktemp rm mv cp date tr cut head tail install \
+    command 2>/dev/null || true
+
+readonly PROGNAME="${0##*/}"
+export LC_ALL=C
+
+BOOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly BOOT_DIR
+
+usage() {
+    cat <<EOF
+Usage: $PROGNAME [OPTION]...
+Emit GRUB menuentries for Voidling OSTree deployments (grub.d drop-in).
+
+When installed as /etc/grub.d/15_voidling, grub-mkconfig runs this with no
+arguments and captures stdout into /boot/grub/grub.cfg. Install the generator
+to /usr/libexec/voidling/generate-boot-menu.sh (see README).
+
+Mandatory arguments to long options are mandatory for short options too.
+
+  -s, --sysroot=DIR     OSTree sysroot (default: guessed)
+      --osname=NAME     OSTree osname/stateroot (default: voidling)
+  -h, --help            display this help and exit
+
+Environment:
+  VOIDLING_SYSROOT      same as --sysroot
+  OSNAME                same as --osname
+EOF
+}
+
+log() {
+    printf '%s\n' "$*" >&2
+}
+
+usage_error() {
+    printf '%s: unrecognized option %s\n' "$PROGNAME" "$1" >&2
+    printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+    exit 2
+}
+
+require_value() {
+    local opt="$1"
+    local rest="${2:-}"
+    if [[ -z "$rest" ]]; then
+        printf '%s: option %s requires an argument\n' "$PROGNAME" "$opt" >&2
+        printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+        exit 2
+    fi
+}
+
+guess_sysroot() {
+    local repo
+    if [[ -n "${VOIDLING_SYSROOT:-}" ]]; then
+        printf '%s\n' "$VOIDLING_SYSROOT"
+        return 0
+    fi
+    if [[ -d /sysroot/ostree ]]; then
+        printf '%s\n' /sysroot
+        return 0
+    fi
+    if [[ -d /ostree/deploy ]]; then
+        printf '%s\n' /
+        return 0
+    fi
+    repo="$(cd -- "${BOOT_DIR}/../.." && pwd)"
+    if [[ -d "${repo}/out/sysroot" ]]; then
+        printf '%s\n' "${repo}/out/sysroot"
+        return 0
+    fi
+    printf '%s\n' ""
+    return 0
+}
+
+find_generator() {
+    local cand
+    for cand in \
+        "${BOOT_DIR}/generate-boot-menu.sh" \
+        /usr/libexec/voidling/generate-boot-menu.sh \
+        /usr/lib/voidling/generate-boot-menu.sh; do
+        if [[ -f "$cand" ]]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    if command -v generate-boot-menu.sh >/dev/null 2>&1; then
+        command -v generate-boot-menu.sh
+        return 0
+    fi
+    return 1
+}
+
+parse_args() {
+    SYSROOT=""
+    OSNAME="${OSNAME:-voidling}"
+    SYSROOT_SET=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            -s | --sysroot)
+                require_value "$1" "${2:-}"
+                SYSROOT="$2"
+                SYSROOT_SET=1
+                shift 2
+                ;;
+            --sysroot=*)
+                SYSROOT="${1#--sysroot=}"
+                SYSROOT_SET=1
+                shift
+                ;;
+            --osname)
+                require_value "$1" "${2:-}"
+                OSNAME="$2"
+                shift 2
+                ;;
+            --osname=*)
+                OSNAME="${1#--osname=}"
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                usage_error "$1"
+                ;;
+            *)
+                printf '%s: unrecognized argument %s\n' "$PROGNAME" "$1" >&2
+                printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    if [[ $# -gt 0 ]]; then
+        printf '%s: unrecognized argument %s\n' "$PROGNAME" "$1" >&2
+        printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+        exit 2
+    fi
+}
+
+main() {
+    local gen
+
+    parse_args "$@"
+
+    if [[ "$SYSROOT_SET" -eq 0 ]]; then
+        SYSROOT="$(guess_sysroot)"
+    fi
+
+    if [[ -z "$SYSROOT" || ! -d "$SYSROOT" ]]; then
+        printf '# Voidling: no OSTree sysroot found; skipping deployment entries\n'
+        log "${PROGNAME}: no OSTree sysroot found; skipping"
+        exit 0
+    fi
+
+    if ! gen="$(find_generator)"; then
+        printf '# Voidling: generate-boot-menu.sh not found; skipping\n'
+        log "${PROGNAME}: generate-boot-menu.sh not found; skipping"
+        exit 0
+    fi
+
+    exec bash -- "$gen" --emit-grub --sysroot="$SYSROOT" --osname="$OSNAME"
+}
+
+main "$@"

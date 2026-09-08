@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# Guided menu for the Voidling prototype installer. Prefers dialog; falls back
+# to a numbered POSIX-style menu. Always execs install-voidling.sh.
+set -euo pipefail
+
+unalias -a 2>/dev/null || true
+unset -f mkdir rm printf cat mktemp command bash dialog 2>/dev/null || true
+
+readonly PROGNAME="${0##*/}"
+export LC_ALL=C
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly ROOT_DIR
+readonly INSTALLER="$ROOT_DIR/tooling/installer/install-voidling.sh"
+readonly WIPE_PHRASE="I UNDERSTAND THIS WIPES DISKS"
+
+TMP_DIR=""
+UI="menu"
+VARIANT="${VARIANT:-minimal}"
+FILESYSTEM="${FILESYSTEM:-zfs}"
+TARGET="dir"
+DEST=""
+WIPE_ACK=0
+
+usage() {
+    cat <<EOF
+Usage: $PROGNAME [OPTION]...
+Guided Voidling install menu (calls install-voidling.sh).
+
+Mandatory arguments to long options are mandatory for short options too.
+
+      --ui=MODE         dialog or menu (default: dialog if available, else menu)
+  -h, --help            display this help and exit
+
+This is a sketch in the spirit of void-installer, not a full TUI.
+Noninteractive installs: use install-voidling.sh. Default target is a
+directory. Disk mode wipes the chosen device only after you type the
+acknowledgment phrase (same as --i-understand-this-wipes-disks).
+EOF
+}
+
+die() {
+    printf '%s: %s\n' "$PROGNAME" "$*" >&2
+    exit 1
+}
+
+usage_error() {
+    printf '%s: %s\n' "$PROGNAME" "$*" >&2
+    printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+    exit 2
+}
+
+log() {
+    printf '%s\n' "$*" >&2
+}
+
+cleanup() {
+    if [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]]; then
+        rm -rf -- "$TMP_DIR"
+    fi
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            --ui)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    usage_error "option requires an argument -- '$1'"
+                fi
+                UI="$2"
+                shift 2
+                ;;
+            --ui=*)
+                UI="${1#*=}"
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                usage_error "unrecognized option $1"
+                ;;
+            *)
+                usage_error "unrecognized argument $1"
+                ;;
+        esac
+    done
+    if [[ $# -gt 0 ]]; then
+        usage_error "unrecognized argument $1"
+    fi
+}
+
+resolve_ui() {
+    case "$UI" in
+        dialog | menu) ;;
+        auto)
+            UI="menu"
+            if command -v dialog >/dev/null 2>&1; then
+                UI="dialog"
+            fi
+            ;;
+        *)
+            die "--ui must be dialog, menu, or auto (got: $UI)"
+            ;;
+    esac
+    if [[ "$UI" == "dialog" ]] && ! command -v dialog >/dev/null 2>&1; then
+        warn_fallback="dialog not found; using numbered menu"
+        log "warning: $warn_fallback"
+        UI="menu"
+    fi
+}
+
+read_line() {
+    local prompt value
+    prompt="$1"
+    printf '%s' "$prompt" >&2
+    if ! IFS= read -r value; then
+        die "no input"
+    fi
+    printf '%s' "$value"
+}
+
+menu_pick() {
+    local title choice i opt
+    title="$1"
+    shift
+    if [[ "$UI" == "dialog" ]]; then
+        dialog_pick "$title" "$@"
+        return 0
+    fi
+    log ""
+    log "$title"
+    i=1
+    for opt in "$@"; do
+        printf '  %s) %s\n' "$i" "$opt" >&2
+        i=$((i + 1))
+    done
+    choice="$(read_line "Choice [1]: ")"
+    if [[ -z "$choice" ]]; then
+        choice=1
+    fi
+    case "$choice" in
+        *[!0-9]*)
+            die "invalid choice: $choice"
+            ;;
+    esac
+    if [[ "$choice" -lt 1 || "$choice" -gt $# ]]; then
+        die "choice out of range: $choice"
+    fi
+    printf '%s' "${!choice}"
+}
+
+dialog_pick() {
+    local title tmp i opt args choice
+    title="$1"
+    shift
+    tmp="$TMP_DIR/dialog-out"
+    args=()
+    i=1
+    for opt in "$@"; do
+        args+=("$i" "$opt")
+        i=$((i + 1))
+    done
+    if ! dialog --clear --title "Voidling installer" --menu "$title" 16 60 8 \
+        "${args[@]}" 2>"$tmp"; then
+        die "cancelled"
+    fi
+    choice="$(cat -- "$tmp")"
+    printf '%s' "${!choice}"
+}
+
+dialog_input() {
+    local title default tmp
+    title="$1"
+    default="$2"
+    tmp="$TMP_DIR/dialog-out"
+    if ! dialog --clear --title "Voidling installer" --inputbox "$title" 10 70 \
+        "$default" 2>"$tmp"; then
+        die "cancelled"
+    fi
+    cat -- "$tmp"
+}
+
+confirm_yes() {
+    local title reply
+    title="$1"
+    if [[ "$UI" == "dialog" ]]; then
+        if dialog --clear --title "Voidling installer" --yesno "$title" 10 70; then
+            return 0
+        fi
+        return 1
+    fi
+    log ""
+    log "$title"
+    reply="$(read_line "Proceed? [y/N]: ")"
+    case "$reply" in
+        y | Y | yes | YES)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+collect_choices() {
+    local pick dest_default wipe
+    dest_default="${OUT_DIR:-$ROOT_DIR/out}/install-staging"
+
+    log "Voidling installer (prototype)"
+    log "Directory/sysroot mode is the default (no disks are touched)."
+    log "Disk mode partitions and formats the device after acknowledgment."
+    log "For a noninteractive run, use: bash -- $INSTALLER"
+
+    if [[ "$VARIANT" == "plasma" ]]; then
+        pick="$(menu_pick "Image variant" "plasma (KDE Plasma)" "minimal (no DE)")"
+    else
+        pick="$(menu_pick "Image variant" "minimal (no DE)" "plasma (KDE Plasma)")"
+    fi
+    case "$pick" in
+        minimal*)
+            VARIANT="minimal"
+            ;;
+        plasma*)
+            VARIANT="plasma"
+            ;;
+        *)
+            die "unexpected variant pick: $pick"
+            ;;
+    esac
+
+    pick="$(menu_pick "Root filesystem" "zfs" "btrfs")"
+    case "$pick" in
+        btrfs | zfs)
+            FILESYSTEM="$pick"
+            ;;
+        *)
+            die "unexpected filesystem pick: $pick"
+            ;;
+    esac
+
+    pick="$(menu_pick "Install target" "directory / sysroot (safe default)" "whole disk (WIPES the device)")"
+    case "$pick" in
+        directory*)
+            TARGET="dir"
+            ;;
+        disk*)
+            TARGET="disk"
+            ;;
+        *)
+            die "unexpected target pick: $pick"
+            ;;
+    esac
+
+    if [[ "$TARGET" == "dir" ]]; then
+        if [[ "$UI" == "dialog" ]]; then
+            DEST="$(dialog_input "Destination directory" "$dest_default")"
+        else
+            DEST="$(read_line "Destination directory [$dest_default]: ")"
+        fi
+        if [[ -z "$DEST" ]]; then
+            DEST="$dest_default"
+        fi
+    else
+        if [[ "$UI" == "dialog" ]]; then
+            DEST="$(dialog_input "Block device to WIPE (whole disk)" "/dev/disk/by-id/...")"
+        else
+            DEST="$(read_line "Block device to WIPE (whole disk) [/dev/disk/by-id/...]: ")"
+        fi
+        if [[ -z "$DEST" ]]; then
+            die "disk target requires a device path"
+        fi
+        log "Type exactly: $WIPE_PHRASE"
+        if [[ "$UI" == "dialog" ]]; then
+            wipe="$(dialog_input "Acknowledge disk mention" "")"
+        else
+            wipe="$(read_line "> ")"
+        fi
+        if [[ "$wipe" != "$WIPE_PHRASE" ]]; then
+            die "disk acknowledgment does not match"
+        fi
+        WIPE_ACK=1
+    fi
+}
+
+run_installer() {
+    local args
+    args=(
+        --target="$TARGET"
+        --dest="$DEST"
+        --variant="$VARIANT"
+        --filesystem="$FILESYSTEM"
+    )
+    if [[ "$WIPE_ACK" == "1" ]]; then
+        args+=(--i-understand-this-wipes-disks)
+    fi
+
+    log ""
+    log "About to run:"
+    log "  bash -- $INSTALLER ${args[*]}"
+    if ! confirm_yes "Run the installer with these settings?"; then
+        die "aborted"
+    fi
+
+    exec bash -- "$INSTALLER" "${args[@]}"
+}
+
+main() {
+    trap cleanup EXIT
+    TMP_DIR="$(mktemp -d -- "${TMPDIR:-/tmp}/voidling-installer.XXXXXX")"
+
+    UI="${VOIDLING_INSTALLER_UI:-auto}"
+    parse_args "$@"
+
+    if [[ ! -t 0 ]]; then
+        die "stdin is not a tty; use install-voidling.sh for noninteractive installs"
+    fi
+
+    [[ -f "$INSTALLER" ]] || die "missing $INSTALLER"
+    resolve_ui
+    collect_choices
+    run_installer
+}
+
+main "$@"

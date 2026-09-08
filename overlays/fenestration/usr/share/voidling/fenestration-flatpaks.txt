@@ -1,0 +1,9 @@
+# Recommended Fenestration Flatpaks (not Steam)
+
+Install on the running system with Flatpak (Flathub). These are not in the
+immutable .xbps seed.
+
+com.usebottles.bottles
+com.heroicgameslauncher.hgl
+net.davidotek.pupgui2
+org.winehq.Wine

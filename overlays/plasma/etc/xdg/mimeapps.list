@@ -1,0 +1,15 @@
+[Default Applications]
+text/html=zen.desktop
+application/xhtml+xml=zen.desktop
+x-scheme-handler/http=zen.desktop
+x-scheme-handler/https=zen.desktop
+x-scheme-handler/about=zen.desktop
+x-scheme-handler/unknown=zen.desktop
+inode/directory=org.kde.dolphin.desktop
+
+[Added Associations]
+text/html=zen.desktop;
+application/xhtml+xml=zen.desktop;
+x-scheme-handler/http=zen.desktop;
+x-scheme-handler/https=zen.desktop;
+inode/directory=org.kde.dolphin.desktop;

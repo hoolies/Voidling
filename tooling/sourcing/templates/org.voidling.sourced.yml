@@ -1,0 +1,29 @@
+# Sketch Flatpak manifest for a sourced Void template.
+# A real port must map the void-packages template (sources, patches, deps)
+# onto Flatpak modules. This file is a starting point, not a working build.
+#
+#   flatpak-builder --repo=out/sourcing/flatpak/repo --force-clean \
+#     out/sourcing/flatpak/build-dir out/sourcing/flatpak/org.voidling.sourced.TEMPLATE.yml
+#   flatpak build-bundle out/sourcing/flatpak/repo \
+#     out/sourcing/flatpak/TEMPLATE.flatpak org.voidling.sourced.TEMPLATE
+
+app-id: org.voidling.sourced.TEMPLATE
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: TEMPLATE
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+modules:
+  - name: TEMPLATE
+    buildsystem: simple
+    build-commands:
+      - echo "TODO: install files from the xbps-src destpkg for TEMPLATE"
+      - install -d "${FLATPAK_DEST}/bin"
+    sources:
+      - type: dir
+        path: ../../cache/void-packages/srcpkgs/TEMPLATE

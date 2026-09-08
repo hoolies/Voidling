@@ -1,0 +1,11 @@
+# Voidling application policy (locked)
+
+Priority on a running system:
+
+1. Flatpak (Flathub is the default remote)
+2. Sourcing (next generation / OCI / Flatpak artifact — never live xbps)
+3. Distrobox
+4. AppImage
+
+The booted host does not install apps with xbps. /usr and xbps state are
+mounted read-only (see /usr/lib/voidling/mount-immutable.sh).
