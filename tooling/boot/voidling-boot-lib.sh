@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for Voidling boot-menu tools.
 # Sourced by generate-boot-menu.sh, voidling-rollback.sh, and
 # voidling-upgrade.sh only.

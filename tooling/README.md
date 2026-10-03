@@ -46,3 +46,8 @@ Shared repo: `out/ostree-repo/`
 | ZFS/Btrfs snapshots | `tooling/snapshots/README.md` |
 | Sourcing | `tooling/sourcing/README.md` |
 | First-boot extras | `tooling/firstboot/README.md` |
+| Secure Boot (live ISO, on/off) | `tooling/boot/SECURE-BOOT.md` |
+| LUKS single prompt via TPM2 | `tooling/boot/LUKS-TPM2.md` |
+| Build order / release | `docs/60-build-and-release.md` |
+| Lint + unit tests | `bash tooling/ci.sh` (`--lint-only`, `--tests-only`, `--fix`) |
+| Reclaim `out/` space | `tooling/image/clean-out.sh` (dry run; `--apply`) |

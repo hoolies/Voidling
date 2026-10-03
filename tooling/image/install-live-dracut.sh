@@ -333,8 +333,29 @@ publish_live_initrd() {
     STAGE_TMP=""
 }
 
+# Drivers for the live initrd. Storage/boot media only; zfs is added
+# only when the tree really ships the module (WITH_ZFS=1 composes), so a
+# btrfs-only tree does not log "FAILED dracut-install zfs".
+live_add_drivers() {
+    local kver="$1" drivers
+
+    drivers="iso9660 squashfs overlay loop sr_mod cdrom"
+    drivers="$drivers virtio_blk virtio_pci virtio_scsi ahci sd_mod"
+    if tree_has_module "$kver" zfs; then
+        drivers="$drivers zfs"
+    fi
+    printf '%s\n' "$drivers"
+}
+
+tree_has_module() {
+    local kver="$1" name="$2" moddir
+    moddir="$ROOTFS_DIR/usr/lib/modules/$kver"
+    [[ -d "$moddir" ]] || return 1
+    find "$moddir" -type f \( -name "$name.ko" -o -name "$name.ko.*" \) -print -quit 2>/dev/null | LC_ALL=C grep -q .
+}
+
 rebuild_initrd() {
-    local kver dracut_bin
+    local kver dracut_bin add_drivers
 
     if [[ "$(id -u)" -ne 0 ]]; then
         die "rebuild requires root (chroot mounts); rerun as root or pass --no-rebuild"
@@ -358,6 +379,8 @@ rebuild_initrd() {
     log "==> building live initrd for $kver"
     log "    output: $LIVE_INITRD"
     log "    rootfs left unchanged (OSTree initrd and /usr/etc)"
+    add_drivers="$(live_add_drivers "$kver")"
+    log "    drivers: $add_drivers"
     chroot -- "$ROOTFS_DIR" "$dracut_bin" --force \
         --conf /run/voidling-live/dracut.conf \
         --confdir /run/voidling-live/conf.d \
@@ -365,7 +388,7 @@ rebuild_initrd() {
         --no-hostonly --no-hostonly-cmdline \
         --omit "voidling-ostree zfs 02zfsexpandknowledge" \
         --add "dmsquash-live overlayfs pollcdrom" \
-        --add-drivers "iso9660 squashfs overlay loop sr_mod cdrom virtio_blk virtio_pci virtio_scsi ahci sd_mod zfs" \
+        --add-drivers "$add_drivers" \
         -- /run/voidling-live/initramfs.img "$kver"
     publish_live_initrd
 }

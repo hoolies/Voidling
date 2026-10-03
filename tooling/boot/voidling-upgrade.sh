@@ -530,9 +530,13 @@ do_pull() {
         return 0
     fi
 
+    ensure_remote_verification "$repo"
     log "pulling ${OSTREE_REMOTE}:${OSTREE_REF} into ${repo}"
     if ostree --repo="$repo" pull "$OSTREE_REMOTE" "$OSTREE_REF"; then
         return 0
+    fi
+    if remote_verifies "$repo"; then
+        die "signed pull failed for ${OSTREE_REF}; refusing unverified pull-local fallback (remote ${OSTREE_REMOTE} enforces ed25519)"
     fi
     if [[ -n "$archive" && -d "$archive" ]]; then
         log "remote pull failed; falling back to pull-local ${archive}"
@@ -540,6 +544,31 @@ do_pull() {
         return 0
     fi
     die "ostree pull failed for ${OSTREE_REF}"
+}
+
+remote_verifies() {
+    local repo="$1"
+    ostree --repo="$repo" config get "remote \"${OSTREE_REMOTE}\".verification-ed25519-key" >/dev/null 2>&1
+}
+
+ensure_remote_verification() {
+    # Deployments made before signing shipped have a remote without a key.
+    # When the running tree trusts a Voidling key, pin it on the remote so
+    # this and every later pull verifies.
+    local repo="$1" trust key
+    trust="/usr/share/ostree/trusted.ed25519.d/voidling.ed25519"
+    if remote_verifies "$repo"; then
+        return 0
+    fi
+    [[ -r "$trust" ]] || return 0
+    key="$(tr -d '[:space:]' <"$trust")"
+    [[ -n "$key" ]] || return 0
+    if ostree --repo="$repo" config set "remote \"${OSTREE_REMOTE}\".verification-ed25519-key" "$key" 2>/dev/null &&
+        ostree --repo="$repo" config set "remote \"${OSTREE_REMOTE}\".sign-verify" ed25519 2>/dev/null; then
+        log "remote ${OSTREE_REMOTE}: enabled ed25519 verification from ${trust}"
+    else
+        log "warning: could not enable ed25519 verification on remote ${OSTREE_REMOTE}"
+    fi
 }
 
 do_snapshot() {
@@ -706,4 +735,7 @@ main() {
     print_next_boot_default
 }
 
-main "$@"
+# Tests source this file with VOIDLING_NO_MAIN=1 to exercise functions.
+if [[ "${VOIDLING_NO_MAIN:-0}" != "1" ]]; then
+    main "$@"
+fi

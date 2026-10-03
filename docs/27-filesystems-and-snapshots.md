@@ -2,8 +2,8 @@
 
 ## Goals
 
-- The OS ships with **ZFS** (default at install) and **Btrfs**.
-- Installer **defaults to ZFS**; Btrfs remains a choice.
+- The OS supports **ZFS** and **Btrfs**. Compose `WITH_ZFS=1` adds ZFS (DKMS).
+- Installer default is `auto`: ZFS when the medium ships ZFS, otherwise Btrfs. The shipped ISOs are Btrfs-only (`WITH_ZFS=0`); `--filesystem=zfs|btrfs` forces a choice.
 - System takes **automatic snapshots** before every major change.
 - Snapshot retention:
   - Keep the **last 3 automatic snapshots per type**, and

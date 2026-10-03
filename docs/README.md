@@ -15,5 +15,6 @@ Use **`@Voidling/docs/`** in Cursor when you want this context without re-pastin
 | [40-ai-and-token-workflow.md](40-ai-and-token-workflow.md) | Clones vs tokens, what to attach in chats |
 | [50-mvp.md](50-mvp.md) | MVP definition (what exists today) |
 | [55-installer.md](55-installer.md) | Directory vs disk installer; what a real disk install will do |
+| [60-build-and-release.md](60-build-and-release.md) | Build order: keys → compose → commit → ISO/qcow2 → smokes → housekeeping; credential/root policy table |
 
 These files are **distilled** from early planning chats; they are not a full mirror of Fedora or Void documentation.

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
-unset -f printf mkdir chmod python3 openssl 2>/dev/null || true
+unset -f printf mkdir chmod python3 openssl tr base64 wc 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
 export LC_ALL=C
@@ -24,8 +24,10 @@ Environment:
   OUT_DIR           output directory (default: <repo>/out)
   OSTREE_KEYS_DIR   key directory (default: OUT_DIR/ostree-keys)
 
-The secret file is 128 hex characters (64-byte libostree ed25519 secret:
-32-byte seed || 32-byte public key).
+Both files are base64 as libostree expects: the secret is the 64-byte
+ed25519 secret (32-byte seed || 32-byte public key, 88 base64 chars) and the
+public key is 32 bytes (44 base64 chars). Older 128-hex secrets are
+converted in place.
 EOF
 }
 
@@ -73,7 +75,7 @@ write_keypair() {
     local public="$2"
     command -v python3 >/dev/null 2>&1 || die "python3 not found (needed for ed25519 keys)"
     python3 - "$secret" "$public" <<'PY'
-import binascii, pathlib, sys
+import base64, pathlib, sys
 
 secret_path = pathlib.Path(sys.argv[1])
 public_path = pathlib.Path(sys.argv[2])
@@ -104,13 +106,37 @@ else:
     seed = bytes(sk)
     pub = bytes(sk.verify_key)
 
-# libostree ed25519 secret = seed (32) || public (32)
+# libostree ed25519 secret = seed (32) || public (32), base64 on disk.
 secret = seed + pub
-secret_path.write_text(binascii.hexlify(secret).decode("ascii") + "\n")
+secret_path.write_text(base64.b64encode(secret).decode("ascii") + "\n")
 secret_path.chmod(0o600)
-public_path.write_text(binascii.hexlify(pub).decode("ascii") + "\n")
+public_path.write_text(base64.b64encode(pub).decode("ascii") + "\n")
 public_path.chmod(0o644)
 PY
+}
+
+convert_hex_keypair() {
+    # Pre-base64 layout: 128 hex chars (seed||pub). Rewrite both files.
+    local secret="$1" public="$2"
+    python3 - "$secret" "$public" <<'PY'
+import base64, binascii, pathlib, sys
+
+secret_path = pathlib.Path(sys.argv[1])
+public_path = pathlib.Path(sys.argv[2])
+raw = binascii.unhexlify(secret_path.read_text().strip())
+assert len(raw) == 64
+secret_path.write_text(base64.b64encode(raw).decode("ascii") + "\n")
+secret_path.chmod(0o600)
+public_path.write_text(base64.b64encode(raw[32:]).decode("ascii") + "\n")
+public_path.chmod(0o644)
+PY
+}
+
+secret_is_valid() {
+    # 64 bytes once base64-decoded.
+    local file="$1" n
+    n="$(tr -d '[:space:]' <"$file" | base64 -d 2>/dev/null | wc -c)"
+    [[ "$n" -eq 64 ]]
 }
 
 main() {
@@ -123,14 +149,20 @@ main() {
     mkdir -p -- "$OSTREE_KEYS_DIR"
     chmod 700 -- "$OSTREE_KEYS_DIR"
     if [[ -f "$secret" ]]; then
-        hex="$(tr -d '[:space:]' <"$secret")"
-        if [[ "${#hex}" -eq 128 ]]; then
+        if secret_is_valid "$secret" && [[ -f "$public" ]]; then
             log "==> OSTree signing keys present"
             log "    $secret"
             printf '%s\n' "$OSTREE_KEYS_DIR"
             return 0
         fi
-        log "==> replacing ill-formed ed25519.secret (${#hex} hex chars; need 128)"
+        hex="$(tr -d '[:space:]' <"$secret")"
+        if [[ "${#hex}" -eq 128 && "$hex" =~ ^[0-9a-fA-F]+$ ]]; then
+            log "==> converting hex ed25519.secret to base64 (libostree format)"
+            convert_hex_keypair "$secret" "$public"
+            printf '%s\n' "$OSTREE_KEYS_DIR"
+            return 0
+        fi
+        log "==> replacing ill-formed ed25519.secret (need 64 bytes base64)"
     fi
     log "==> generating OSTree ed25519 signing keys"
     write_keypair "$secret" "$public"

@@ -19,8 +19,10 @@ device. That flag **does** turn on formatting when `--dry-run` is not set.
 
 1. **Choose variant:** `minimal` (no DE/WM) or `plasma` (full KDE experience).
    Optional later checkbox: Fenestration (`plasma-fenestration`).
-2. **Choose filesystem:** **ZFS default**, Btrfs still offered. Not ext4.
-   The qcow2 prototype uses ext4 only as a VM shortcut.
+2. **Choose filesystem:** `--filesystem=auto` (default) picks ZFS when the
+   install medium has `zpool`+`zfs`, otherwise Btrfs; `zfs`/`btrfs` force it.
+   Shipped ISOs are `WITH_ZFS=0`, so they install Btrfs. Not ext4 (the qcow2
+   prototype uses ext4 only as a VM shortcut).
 3. **GPT layout:**
    - Partition 1: ESP, FAT32, 512 MiB, label `VOIDLING_EFI` (FAT volume label
      truncated to 11 characters), mount `/boot/efi`

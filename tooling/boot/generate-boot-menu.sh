@@ -367,22 +367,22 @@ insmod part_gpt
 insmod gzio
 EOF
     if [[ -n "$ROOT_SUBVOL" ]]; then
-            # ESP chain already set \$root to the Btrfs device. Re-running
-            # search here can clear \$root when modules are not on \$prefix yet.
-            cat <<EOF
+        # ESP chain already set \$root to the Btrfs device. Re-running
+        # search here can clear \$root when modules are not on \$prefix yet.
+        cat <<EOF
 set prefix=(\$root)/${ROOT_SUBVOL}/boot/grub
 EOF
-        elif [[ -n "$ROOT_FS_UUID" ]]; then
-            cat <<EOF
+    elif [[ -n "$ROOT_FS_UUID" ]]; then
+        cat <<EOF
 search --no-floppy --fs-uuid ${ROOT_FS_UUID} --set=root
 set prefix=(\$root)/boot/grub
 EOF
-        elif [[ -n "$SEARCH_LABEL" ]]; then
-            cat <<EOF
+    elif [[ -n "$SEARCH_LABEL" ]]; then
+        cat <<EOF
 search --no-floppy --label ${SEARCH_LABEL} --set=root
 set prefix=(\$root)/boot/grub
 EOF
-        fi
+    fi
     emit_grub_snippet
 }
 

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
-unset -f printf mkdir rm mount umount losetup qemu-img truncate chown \
+unset -f printf mkdir rm mount umount losetup qemu-img truncate chown sync findmnt cryptsetup dmsetup awk sleep \
     command 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
@@ -143,6 +143,50 @@ parse_args() {
     done
 }
 
+# Detach the loop device only once nothing references it any more
+# (mounts on its partitions, a LUKS mapping on top of it). Otherwise the
+# kernel defers the detach and qemu-img reads a half-flushed image: the
+# ESP came out empty that way once. Fail loudly instead of shipping that.
+release_loop() {
+    local dev="$1" n mapping
+    sync
+    for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        if findmnt -n -S "$dev" >/dev/null 2>&1 || findmnt -n -o SOURCE 2>/dev/null | LC_ALL=C grep -q -- "^${dev}p"; then
+            sleep 0.5
+            continue
+        fi
+        mapping="$(luks_mapping_on "$dev")"
+        if [[ -n "$mapping" ]]; then
+            cryptsetup close -- "$mapping" 2>/dev/null || true
+            sleep 0.5
+            continue
+        fi
+        break
+    done
+    if [[ "$n" -ge 20 ]]; then
+        die "loop device $dev is still referenced (mount or LUKS mapping); refusing to convert a half-flushed image"
+    fi
+    losetup --detach "$dev"
+    for n in 1 2 3 4 5 6 7 8 9 10; do
+        losetup -- "$dev" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+    die "loop device $dev did not detach"
+}
+
+# Name of a dm-crypt mapping whose backing device is a partition of DEV.
+luks_mapping_on() {
+    local dev="$1" name
+    command -v dmsetup >/dev/null 2>&1 || return 0
+    for name in $(dmsetup ls --target crypt 2>/dev/null | awk '{print $1}'); do
+        if cryptsetup status -- "$name" 2>/dev/null | LC_ALL=C grep -q -- "device:  *${dev}p"; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    done
+    return 0
+}
+
 cleanup() {
     set +e
     if [[ -n "$LOOPDEV" ]]; then
@@ -227,7 +271,7 @@ EOF
     fi
     "${install_cmd[@]}"
 
-    losetup --detach "$LOOPDEV"
+    release_loop "$LOOPDEV"
     LOOPDEV=""
     log "==> converting to qcow2"
     qemu-img convert -f raw -O qcow2 -- "$RAW_PATH" "$IMAGE_PATH"

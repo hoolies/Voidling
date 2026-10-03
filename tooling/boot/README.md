@@ -43,6 +43,9 @@ No UEFI NVRAM write is performed by any tool here.
 | `generate-boot-menu.sh` | Read a sysroot, emit BLS + `grub.cfg` |
 | `15_voidling` | `grub-mkconfig` drop-in (calls the generator) |
 | `voidling-boot-lib.sh` | Shared discovery helpers (sourced, not run) |
+| `ensure-secureboot-keys.sh` / `ensure-secureboot-tools.sh` | Secure Boot signing key + host tools (`SECURE-BOOT.md`) |
+| `SECURE-BOOT.md` | Signed GRUB/kernel chain for the live ISO (`build-iso.sh --secure-boot`) |
+| `LUKS-TPM2.md` | Opt-in clevis/TPM2 slot so a LUKS root asks once |
 
 ## Prototype (directory sysroot)
 

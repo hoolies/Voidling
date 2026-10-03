@@ -12,6 +12,7 @@ BOOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly BOOT_DIR
 
 # shellcheck source=voidling-grub-esp.sh
+# shellcheck source=voidling-grub-esp.sh
 . "${BOOT_DIR}/voidling-grub-esp.sh"
 
 usage() {
@@ -84,7 +85,7 @@ main() {
     assert_contains "$btrfs_cfg" "configfile (\$root)/@/boot/grub.cfg" btrfs
     assert_not_contains "$btrfs_cfg" 'grub-voidling.cfg' btrfs
     assert_contains "$zfs_cfg" 'search --no-floppy --set=root --label voidlingqemu' zfs
-    assert_contains "$zfs_cfg" 'configfile ($root)/boot/grub.cfg' zfs
+    assert_contains "$zfs_cfg" "configfile (\$root)/boot/grub.cfg" zfs
     btrfs_cfg="$(vge_esp_chain_cfg btrfs VOIDLING_ROOT '' deadbeef-0000-0000-0000-00000000beef)"
     assert_contains "$btrfs_cfg" 'search --no-floppy --fs-uuid deadbeef-0000-0000-0000-00000000beef --set=root' btrfs_uuid
     assert_contains "$btrfs_cfg" "configfile (\$root)/@/boot/grub.cfg" btrfs_uuid

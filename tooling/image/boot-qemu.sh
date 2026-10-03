@@ -32,6 +32,19 @@ readonly -a OVMF_CODE_CANDIDATES=(
     /usr/share/edk2/ovmf/OVMF.fd
 )
 
+# Secure-Boot-capable CODE firmware (SMM builds). Vars templates are guessed
+# per file; pass --ovmf-vars with an enrolled vars image to actually enforce.
+readonly -a OVMF_SECURE_CODE_CANDIDATES=(
+    /usr/share/qemu/edk2-x86_64-secure-code.fd
+    /usr/share/edk2-ovmf/x64/OVMF_CODE.secboot.fd
+    /usr/share/edk2/x64/OVMF_CODE.secboot.fd
+    /usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd
+    /usr/share/OVMF/OVMF_CODE.secboot.fd
+    /usr/share/OVMF/OVMF_CODE_4M.secboot.fd
+    /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd
+)
+
+SECURE_BOOT="${SECURE_BOOT:-0}"
 WORK_DIR=""
 USE_KVM=0
 NO_KVM=0
@@ -66,6 +79,10 @@ Mandatory arguments to long options are mandatory for short options too.
       --bios FILE       use -bios FILE instead of pflash
       --nographic       serial console on stdio (no GUI)
       --no-kvm          do not use KVM even if /dev/kvm exists
+      --secure-boot     use Secure-Boot-capable OVMF (SMM, q35 smm=on). Pair
+                        with --ovmf-vars pointing at a vars image that has the
+                        Voidling certificate enrolled (see
+                        tooling/image/test-secureboot-iso.sh)
   -h, --help            display this help and exit
 
 OVMF is detected from Void, Debian/Ubuntu, and Fedora paths when
@@ -84,6 +101,7 @@ Environment:
   QEMU_BIOS      firmware for -bios (overrides pflash)
   QEMU_MEMORY    guest RAM
   QEMU_CPUS      virtual CPUs
+  SECURE_BOOT    1 = same as --secure-boot
   OUT_DIR        output directory (default: <repo>/out)
   TARGET_ARCH    architecture (default: x86_64)
 EOF
@@ -227,6 +245,10 @@ parse_args() {
                 NO_KVM=1
                 shift
                 ;;
+            --secure-boot)
+                SECURE_BOOT=1
+                shift
+                ;;
             --)
                 shift
                 if [[ $# -gt 0 ]]; then
@@ -357,8 +379,22 @@ guess_ovmf_vars() {
         OVMF_CODE.4m.fd)
             vars="$dir/OVMF_VARS.4m.fd"
             ;;
-        edk2-x86_64-code.fd)
-            vars="$dir/edk2-x86_64-vars.fd"
+        edk2-x86_64-code.fd | edk2-x86_64-secure-code.fd)
+            # QEMU ships one vars template for both i386/x86_64 builds.
+            if [[ -f "$dir/edk2-x86_64-vars.fd" ]]; then
+                vars="$dir/edk2-x86_64-vars.fd"
+            else
+                vars="$dir/edk2-i386-vars.fd"
+            fi
+            ;;
+        OVMF_CODE.secboot.fd)
+            vars="$dir/OVMF_VARS.fd"
+            ;;
+        OVMF_CODE.secboot.4m.fd)
+            vars="$dir/OVMF_VARS.4m.fd"
+            ;;
+        OVMF_CODE_4M.secboot.fd)
+            vars="$dir/OVMF_VARS_4M.fd"
             ;;
         OVMF_CODE.fd)
             vars="$dir/OVMF_VARS.fd"
@@ -388,6 +424,15 @@ resolve_firmware() {
     if [[ -n "${OVMF_CODE:-}" ]]; then
         [[ -f "$OVMF_CODE" ]] || die "OVMF code firmware not found: $OVMF_CODE"
         OVMF_CODE="$(absolutize_existing "$OVMF_CODE")"
+    elif [[ "$SECURE_BOOT" == "1" ]]; then
+        OVMF_CODE=""
+        for cand in "${OVMF_SECURE_CODE_CANDIDATES[@]}"; do
+            if [[ -f "$cand" ]]; then
+                OVMF_CODE="$cand"
+                break
+            fi
+        done
+        [[ -n "$OVMF_CODE" ]] || die "no Secure-Boot OVMF firmware found (edk2 *secure-code.fd / OVMF_CODE.secboot.fd); set --ovmf-code"
     else
         OVMF_CODE=""
         for cand in "${OVMF_CODE_CANDIDATES[@]}"; do
@@ -454,7 +499,14 @@ prepare_vars_copy() {
 
 build_qemu_args() {
     QEMU_ARGS=()
-    QEMU_ARGS+=(-machine q35)
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        # SMM-backed variable store: required for the secure OVMF builds.
+        QEMU_ARGS+=(-machine "q35,smm=on")
+        QEMU_ARGS+=(-global "driver=cfi.pflash01,property=secure,value=on")
+        QEMU_ARGS+=(-global "ICH9-LPC.disable_s3=1")
+    else
+        QEMU_ARGS+=(-machine q35)
+    fi
     QEMU_ARGS+=(-m "$QEMU_MEMORY")
     QEMU_ARGS+=(-smp "$QEMU_CPUS")
     if [[ "$USE_KVM" == "1" ]]; then
@@ -513,7 +565,13 @@ run_qemu() {
     else
         log "    accel:    tcg"
     fi
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        log "    secure:   on (SMM; enforcement depends on the vars image)"
+    fi
     log_qemu_cmd
+    # Foreground: a background qemu in a script has stdin redirected to
+    # /dev/null (bash, no job control), so serial passphrases never arrive.
+    # Harnesses start a new session and killpg() the wrapper + this child.
     qemu-system-x86_64 "${QEMU_ARGS[@]}"
 }
 

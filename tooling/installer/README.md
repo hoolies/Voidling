@@ -78,8 +78,13 @@ bash tooling/installer/install-voidling.sh \
   --i-understand-this-wipes-disks
 ```
 
-Optional: `--filesystem=zfs` (default) or `--filesystem=btrfs`,
-`--variant=minimal` (default) or `--variant=plasma`.
+Optional: `--filesystem=auto` (default: ZFS if `zpool`+`zfs` are present,
+else Btrfs), `--filesystem=zfs`, or `--filesystem=btrfs`;
+`--variant=minimal` (default) or `--variant=plasma`;
+`--root-access=locked|password|none` (default `locked`; `none` gives the
+replacement user no wheel membership, so no root path);
+`--luks-passphrase-file=FILE` for LUKS2, plus `--luks-tpm2` to seal a TPM2
+slot via clevis (needs a `WITH_TPM2=1` tree; see `tooling/boot/LUKS-TPM2.md`).
 
 That combination (and not `--dry-run`) will:
 

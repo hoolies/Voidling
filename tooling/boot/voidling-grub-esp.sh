@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ESP chain-load helpers for Voidling GRUB (sourced by install-bootloader.sh).
 # Prefix: vge_
 

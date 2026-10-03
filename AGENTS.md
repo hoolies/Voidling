@@ -13,7 +13,10 @@
 - **Compose trees**: `/usr/etc` (no `/etc`) so OSTree deploy does not rewrite the commit.
 - **Optional**: Fenestration — Windows compatibility **without Steam**.
 - **Git**: owner creates the repo; do not `git init`.
-- **Filesystems**: **ZFS default** at install; Btrfs still a choice. Snapshots before major changes; keep last 3 per type + user-pinned.
+- **Filesystems**: ZFS preferred when the install medium ships it, Btrfs otherwise (`--filesystem=auto`; shipped ISOs are `WITH_ZFS=0`, so they install Btrfs). Snapshots before major changes; keep last 3 per type + user-pinned.
+- **Credentials**: lab login `voidling`/`voidling` on images and live ISO; live ISO root has no password. Installed systems force replacing the lab user on first login; root access policy `--root-access=locked|password|none` (default `locked`).
+- **Supply chain**: OSTree commits are ed25519-signed when `out/ostree-keys` exists (`OSTREE_SIGN=auto`); the public key ships in the tree. Secure Boot is an on/off ISO option (`build-iso.sh --secure-boot`). Private keys never enter git.
+- **Shell**: every script passes `bash tooling/ci.sh` (shellcheck, shfmt, unit tests) before commit.
 
 ## Vocabulary
 
@@ -22,8 +25,10 @@
 
 ## Repo layout (initial)
 
-- `docs/`: token-saving project notes / decisions
-- `tooling/`: prototype compose / build / publish scripts
+- `docs/`: token-saving project notes / decisions (`60-build-and-release.md` = build order)
+- `tooling/`: compose / ostree / initramfs / image / installer / firstboot / boot / snapshots / sourcing / container; `tooling/ci.sh` is the lint + unit-test gate
+- `overlays/`: files applied onto composed trees (`immutable`, `initramfs`, `live`, plasma look)
+- `out/`: build artifacts and host-local keys (git-ignored)
 
 ## Image variants (rootfs + OSTree)
 

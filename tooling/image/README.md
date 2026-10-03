@@ -193,7 +193,7 @@ Live kernel arguments:
 
 A sealed compose tree has `/usr/etc` and no `/etc`. `build-iso.sh` copies `/usr/etc` → `/etc` for the squashfs only, then removes that temporary `/etc` so the compose tree stays sealed.
 
-The live squashfs also ships the installer (`voidling-installer`, `install-voidling`) plus `tooling/{installer,snapshots,ostree,boot,firstboot}` under `/usr/lib/voidling`. Those copies are removed from the compose tree after packing. Live defaults: `VARIANT` from the ISO variant, `FILESYSTEM=zfs`, staging under `/var/tmp/voidling`.
+The live squashfs also ships the installer (`voidling-installer`, `install-voidling`) plus `tooling/{installer,snapshots,ostree,boot,firstboot}` under `/usr/lib/voidling`. Those copies are removed from the compose tree after packing. Live defaults: `VARIANT` from the ISO variant, `FILESYSTEM=auto` (Btrfs on the shipped `WITH_ZFS=0` ISOs), staging under `/var/tmp/voidling`. Live root has no password; `voidling`/`voidling` is the lab user. `build-iso.sh --secure-boot` signs the chain (`tooling/boot/SECURE-BOOT.md`); `SQUASHFS_COMP=zstd` is available. `clean-out.sh` prunes OSTree history and stale `out/tmp`.
 
 A full writable live session still needs a **BOOTABLE** rootfs (`linux` + `dracut`) and the side initrd from `install-live-dracut.sh` (dmsquash-live, without `voidling-ostree`). The ISO packs that file as `/boot/initrd`. It does not pack `/boot/initramfs-*.img` from the rootfs.
 
@@ -241,6 +241,14 @@ qemu-system-x86_64 \
   -cdrom out/voidling-x86_64-uefi-minimal.iso \
   -boot d
 ```
+
+## Housekeeping
+
+`clean-out.sh` is a dry run by default: it prints the `ostree prune` plan
+for `out/ostree-repo*` (keeps current + previous commit per ref), lists
+`out/tmp` entries older than 24h, and lists the qcow2/ISO artifacts. With
+`--apply` (root for root-owned repos) it prunes and deletes the stale
+scratch dirs. It never removes keys, rootfs trees, or images.
 
 ## Integration
 

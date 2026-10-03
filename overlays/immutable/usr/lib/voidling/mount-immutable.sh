@@ -9,9 +9,36 @@ export LC_ALL=C
 
 PROGNAME="${0##*/}"
 
+usage() {
+    cat <<EOF
+Usage: $PROGNAME [OPTION]...
+Bind-mount /usr, /var/db/xbps, and /var/cache/xbps read-only (runit stage 1).
+
+Mandatory arguments to long options are mandatory for short options too.
+
+  -h, --help            display this help and exit
+
+Takes no operands; run as root from runit core-services. Mount failures are
+logged with the mount table and never abort boot.
+EOF
+}
+
 log() {
     printf '%s\n' "$*" >&2
 }
+
+case "${1:-}" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    '') ;;
+    *)
+        printf '%s: unrecognized option %s\n' "$PROGNAME" "$1" >&2
+        printf "Try '%s --help' for more information.\n" "$PROGNAME" >&2
+        exit 2
+        ;;
+esac
 
 log_mount_table() {
     if [ ! -r /proc/mounts ]; then

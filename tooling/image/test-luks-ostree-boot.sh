@@ -94,7 +94,7 @@ main() {
     VOIDLING_ROOT="$ROOT_DIR" IMAGE_PATH="$image" LOG_FILE="$log_file" \
         VOIDLING_LUKS_PASS="$LUKS_PASSPHRASE" LUKS_BOOT_TIMEOUT="${LUKS_BOOT_TIMEOUT:-900}" \
         python3 - <<'PY' || die "LUKS serial unlock failed (log $log_file)"
-import os, pty, select, subprocess, sys, time
+import os, pty, select, signal, subprocess, sys, time
 
 root = os.environ["VOIDLING_ROOT"]
 image = os.environ["IMAGE_PATH"]
@@ -107,7 +107,7 @@ cmd = [
     "--image", image, "--nographic", "--no-kvm", "-m", "2048",
 ]
 master, slave = pty.openpty()
-proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True, start_new_session=True)
 os.close(slave)
 
 buf = b""
@@ -196,11 +196,18 @@ try:
             emit(chunk)
 finally:
     if proc.poll() is None:
-        proc.terminate()
+        # Kill the whole session (wrapper + qemu), not just the wrapper.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     os.close(master)
 
 if b"login:" not in buf and b"running stage 2" not in buf:

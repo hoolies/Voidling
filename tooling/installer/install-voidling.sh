@@ -17,7 +17,10 @@ readonly ROOT_DIR
 
 readonly DEFAULT_TARGET="dir"
 readonly DEFAULT_VARIANT="minimal"
-readonly DEFAULT_FILESYSTEM="zfs"
+# auto: zfs when zpool+zfs are present on the installing host, else btrfs.
+readonly DEFAULT_FILESYSTEM="auto"
+readonly DEFAULT_ROOT_ACCESS="locked"
+readonly DEFAULT_TPM2_PCRS="7"
 readonly DEFAULT_ARCH="x86_64"
 readonly DEFAULT_LIBC="glibc"
 readonly DEFAULT_OSNAME="voidling"
@@ -58,7 +61,11 @@ Mandatory arguments to long options are mandatory for short options too.
   -d, --dest=PATH       destination directory or block device
   -V, --variant=NAME    image variant: minimal, plasma, or plasma-fenestration
                         (default: minimal)
-  -f, --filesystem=FS   root filesystem: zfs or btrfs (default: zfs)
+  -f, --filesystem=FS   root filesystem: auto, zfs, or btrfs (default: auto;
+                        zfs when zpool/zfs exist on this host, else btrfs)
+      --root-access=P   installed root policy: locked (root locked, user in
+                        wheel), password (root shares the user password),
+                        none (root locked, user not in wheel) (default: locked)
       --ostree-repo=DIR source OSTree repository
       --ostree-ref=REF  OSTree ref to deploy
       --osname=NAME     OSTree osname (default: voidling)
@@ -71,13 +78,19 @@ Mandatory arguments to long options are mandatory for short options too.
                         --luks-passphrase-file is set
       --luks-passphrase-file=FILE
                         passphrase file for disk-apply LUKS (not echoed)
+      --luks-tpm2       also bind the LUKS root to this machine's TPM2
+                        (clevis, PCR 7) so the initramfs opens it without a
+                        second prompt; requires a WITH_TPM2=1 tree and
+                        /dev/tpmrm0 (default: off)
+      --tpm2-pcrs=LIST  PCRs for --luks-tpm2 (default: $DEFAULT_TPM2_PCRS)
   -h, --help            display this help and exit
 
 Environment (flags override these):
   TARGET          dir or disk (default: dir)
   DEST            destination directory or block device
   VARIANT         minimal or plasma
-  FILESYSTEM      zfs or btrfs (default: zfs)
+  FILESYSTEM      auto, zfs, or btrfs (default: auto)
+  VOIDLING_ROOT_ACCESS  locked, password, or none (default: locked)
   TARGET_ARCH     architecture (default: x86_64)
   TARGET_LIBC     libc (default: glibc; only glibc supported)
   OUT_DIR         output directory (default: <repo>/out)
@@ -92,6 +105,8 @@ Environment (flags override these):
   SWAP            1 to record optional swap (plan only; default off)
   LUKS            1 to request LUKS (default off)
   LUKS_PASS_FILE  passphrase file used when disk apply opens LUKS
+  LUKS_TPM2       1 to bind the LUKS root to TPM2 via clevis (default off)
+  TPM2_PCRS       PCR list for the clevis tpm2 pin (default $DEFAULT_TPM2_PCRS)
   VOIDLING_HOSTNAME  passed through to first-boot (not HOSTNAME)
   VOIDLING_USER      passed through to first-boot
 EOF
@@ -118,11 +133,12 @@ warn() {
 
 cleanup() {
     local i mp
+    sync
     if [[ ${#MOUNTED_PATHS[@]} -gt 0 ]]; then
         for ((i = ${#MOUNTED_PATHS[@]} - 1; i >= 0; i--)); do
             mp="${MOUNTED_PATHS[$i]}"
             if [[ -n "$mp" ]] && findmnt -n -- "$mp" >/dev/null 2>&1; then
-                umount -- "$mp" 2>/dev/null || umount -l -- "$mp" 2>/dev/null || true
+                umount_retry "$mp"
             fi
         done
     fi
@@ -134,12 +150,43 @@ cleanup() {
         zpool export -- "$ZPOOL_CREATED" 2>/dev/null || true
     fi
     if [[ -n "${LUKS_OPENED:-}" ]]; then
-        cryptsetup close -- "${LUKS_NAME:-voidling-root}" 2>/dev/null || true
+        luks_close_retry "${LUKS_NAME:-voidling-root}"
         LUKS_OPENED=""
     fi
     if [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]]; then
         rm -rf -- "$TMP_DIR"
     fi
+}
+
+# A plain umount can hit EBUSY for a moment (udev/btrfs scanners touching
+# the fresh filesystem). Retry briefly before falling back to a lazy
+# unmount; a lazy unmount leaves the device referenced, which then makes
+# 'cryptsetup close' and 'losetup -d' defer and the image gets converted
+# before the ESP is flushed.
+umount_retry() {
+    local mp="$1" n
+    for n in 1 2 3 4 5 6 7 8 9 10; do
+        if umount -- "$mp" 2>/dev/null; then
+            return 0
+        fi
+        findmnt -n -- "$mp" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+    log "warning: lazy unmount of $mp after ${n} attempts"
+    umount -l -- "$mp" 2>/dev/null || true
+}
+
+luks_close_retry() {
+    local name="$1" n
+    for n in 1 2 3 4 5 6 7 8 9 10; do
+        if cryptsetup close -- "$name" 2>/dev/null; then
+            return 0
+        fi
+        cryptsetup status -- "$name" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+    log "warning: could not close LUKS mapping $name (still busy)"
+    return 0
 }
 
 unmount_under() {
@@ -155,7 +202,7 @@ unmount_under() {
                 print length($0), $0
             }
         ' | sort -nr | while read -r _ mp; do
-        umount -- "$mp" 2>/dev/null || umount -l -- "$mp" 2>/dev/null || true
+        umount_retry "$mp"
     done || true
 }
 
@@ -212,6 +259,15 @@ parse_args() {
                 FILESYSTEM="${1#*=}"
                 shift
                 ;;
+            --root-access)
+                require_arg "$1" "${2:-}"
+                VOIDLING_ROOT_ACCESS="$2"
+                shift 2
+                ;;
+            --root-access=*)
+                VOIDLING_ROOT_ACCESS="${1#*=}"
+                shift
+                ;;
             --ostree-repo)
                 require_arg "$1" "${2:-}"
                 OSTREE_REPO_DIR="$2"
@@ -265,6 +321,16 @@ parse_args() {
                 LUKS_PASS_FILE="${1#*=}"
                 [[ -n "$LUKS_PASS_FILE" ]] || usage_error "option requires an argument -- 'luks-passphrase-file'"
                 LUKS=1
+                shift
+                ;;
+            --luks-tpm2)
+                LUKS_TPM2=1
+                LUKS=1
+                shift
+                ;;
+            --tpm2-pcrs=*)
+                TPM2_PCRS="${1#*=}"
+                [[ -n "$TPM2_PCRS" ]] || usage_error "option requires an argument -- 'tpm2-pcrs'"
                 shift
                 ;;
             --)
@@ -346,11 +412,27 @@ first_line() {
     printf '%s\n' "${text%%$'\n'*}"
 }
 
+detect_filesystem() {
+    # ZFS is preferred when the installing host can drive it; the shipped
+    # live ISOs are WITH_ZFS=0, so they fall back to Btrfs automatically.
+    if command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1; then
+        log "    filesystem: auto -> zfs (zpool/zfs present)"
+        printf '%s\n' zfs
+        return 0
+    fi
+    log "    filesystem: auto -> btrfs (no zfs userspace on this host)"
+    printf '%s\n' btrfs
+}
+
 apply_defaults() {
     OUT_DIR="${OUT_DIR:-$ROOT_DIR/out}"
     TARGET="${TARGET:-$DEFAULT_TARGET}"
     VARIANT="${VARIANT:-$DEFAULT_VARIANT}"
     FILESYSTEM="${FILESYSTEM:-$DEFAULT_FILESYSTEM}"
+    if [[ "$FILESYSTEM" == "auto" ]]; then
+        FILESYSTEM="$(detect_filesystem)"
+    fi
+    VOIDLING_ROOT_ACCESS="${VOIDLING_ROOT_ACCESS:-$DEFAULT_ROOT_ACCESS}"
     TARGET_ARCH="${TARGET_ARCH:-$DEFAULT_ARCH}"
     TARGET_LIBC="${TARGET_LIBC:-$DEFAULT_LIBC}"
     OSTREE_OSNAME="${OSTREE_OSNAME:-$DEFAULT_OSNAME}"
@@ -360,6 +442,8 @@ apply_defaults() {
     SWAP="${SWAP:-0}"
     LUKS="${LUKS:-0}"
     LUKS_PASS_FILE="${LUKS_PASS_FILE:-}"
+    LUKS_TPM2="${LUKS_TPM2:-0}"
+    TPM2_PCRS="${TPM2_PCRS:-$DEFAULT_TPM2_PCRS}"
     LUKS_NAME="voidling-root"
     LUKS_OPENED=""
     LUKS_UUID=""
@@ -400,7 +484,13 @@ validate_config() {
     case "$FILESYSTEM" in
         btrfs | zfs) ;;
         *)
-            die "FILESYSTEM must be btrfs or zfs (got: $FILESYSTEM)"
+            die "FILESYSTEM must be auto, btrfs, or zfs (got: $FILESYSTEM)"
+            ;;
+    esac
+    case "$VOIDLING_ROOT_ACCESS" in
+        locked | password | none) ;;
+        *)
+            die "VOIDLING_ROOT_ACCESS must be locked, password, or none (got: $VOIDLING_ROOT_ACCESS)"
             ;;
     esac
     if [[ "$TARGET_ARCH" != "x86_64" ]]; then
@@ -422,6 +512,16 @@ validate_config() {
         0 | 1) ;;
         *)
             die "LUKS must be 0 or 1 (got: $LUKS)"
+            ;;
+    esac
+    case "$LUKS_TPM2" in
+        0) ;;
+        1)
+            [[ "$LUKS" == "1" ]] || die "LUKS_TPM2=1 requires LUKS=1"
+            [[ "$TPM2_PCRS" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "TPM2_PCRS must be a comma-separated PCR list (got: $TPM2_PCRS)"
+            ;;
+        *)
+            die "LUKS_TPM2 must be 0 or 1 (got: $LUKS_TPM2)"
             ;;
     esac
 }
@@ -719,6 +819,7 @@ write_plan_env() {
         "ROOT_PART=$ROOT_PART"
         "VARIANT=$VARIANT"
         "FILESYSTEM=$FILESYSTEM"
+        "VOIDLING_ROOT_ACCESS=$VOIDLING_ROOT_ACCESS"
         "TARGET_ARCH=$TARGET_ARCH"
         "TARGET_LIBC=$TARGET_LIBC"
         "OSTREE_REPO_DIR=$OSTREE_REPO_DIR"
@@ -736,6 +837,7 @@ write_plan_env() {
         "APPLY_DISK=$APPLY_DISK"
         "SWAP=$SWAP"
         "LUKS=$LUKS"
+        "LUKS_TPM2=$LUKS_TPM2"
     )
     write_text_file "$PLAN_FILE" "${lines[@]}"
 }
@@ -803,7 +905,7 @@ This installer does not run xbps-install on the target.
 
 Storage extras (plan only; first-boot records these)
 ----------------------------------------------------
-  SWAP=$SWAP  LUKS=$LUKS
+  SWAP=$SWAP  LUKS=$LUKS  LUKS_TPM2=$LUKS_TPM2
   Directory mode never requires LUKS and never creates swap.
   --swap / --luks only write plan.env and etc/voidling/storage-plan.env.
 EOF
@@ -833,6 +935,7 @@ ESP_PART='$ESP_PART' \\
 ROOT_PART='$ROOT_PART' \\
 VARIANT='$VARIANT' \\
 FILESYSTEM='$FILESYSTEM' \\
+VOIDLING_ROOT_ACCESS='$VOIDLING_ROOT_ACCESS' \\
 TARGET_ARCH='$TARGET_ARCH' \\
 TARGET_LIBC='$TARGET_LIBC' \\
 OSTREE_REPO_DIR='$OSTREE_REPO_DIR' \\
@@ -848,6 +951,7 @@ DRY_RUN='$DRY_RUN' \\
 APPLY_DISK='$APPLY_DISK' \\
 SWAP='$SWAP' \\
 LUKS='$LUKS' \\
+LUKS_TPM2='$LUKS_TPM2' \\
 INSTALL_MODE='$TARGET' \\
 BOOT_ALLOW_EXTRA_ENTRIES='1' \\
 BOOTLOADER='grub' \\
@@ -883,6 +987,7 @@ export_helper_env() {
     export APPLY_DISK
     export SWAP
     export LUKS
+    export LUKS_TPM2
     if [[ -n "${LUKS_UUID:-}" ]]; then
         export LUKS_UUID
     fi
@@ -912,6 +1017,7 @@ export_helper_env() {
     if [[ -n "${VOIDLING_SET_ROOT_PASSWORD:-}" ]]; then
         export VOIDLING_SET_ROOT_PASSWORD
     fi
+    export VOIDLING_ROOT_ACCESS
     if [[ -n "${VOIDLING_HOSTNAME:-}" ]]; then
         export VOIDLING_HOSTNAME
     fi
@@ -993,6 +1099,10 @@ require_apply_prereqs() {
     if [[ "$LUKS" == "1" ]]; then
         require_cmd cryptsetup
     fi
+    if [[ "$LUKS_TPM2" == "1" ]]; then
+        require_cmd clevis
+        [[ -c /dev/tpmrm0 || -c /dev/tpm0 ]] || die "--luks-tpm2 needs a TPM2 (/dev/tpmrm0 missing)"
+    fi
     [[ -x "$layout" ]] || die "layout helper missing or not executable: $layout"
     [[ -x "$ROOT_DIR/$HELPER_OSTREE" ]] || die "helper missing or not executable: $ROOT_DIR/$HELPER_OSTREE"
     [[ -x "$ROOT_DIR/$HELPER_BOOT" ]] || die "helper missing or not executable: $ROOT_DIR/$HELPER_BOOT"
@@ -1021,6 +1131,9 @@ print_disk_plan() {
     if [[ "$LUKS" == "1" ]]; then
         log "    cryptsetup luksFormat --type luks2 -- <root-part>"
         log "    cryptsetup open -- <root-part> $LUKS_NAME"
+        if [[ "$LUKS_TPM2" == "1" ]]; then
+            log "    clevis luks bind -d <root-part> tpm2 '{\"pcr_bank\":\"sha256\",\"pcr_ids\":\"$TPM2_PCRS\"}'"
+        fi
     fi
     if [[ "$FILESYSTEM" == "btrfs" ]]; then
         log "    bash -- $ROOT_DIR/$HELPER_BTRFS --apply -L $ROOT_LABEL -- <root-part> $BTRFS_TOP"
@@ -1331,6 +1444,7 @@ open_luks_root() {
         rm -f -- "$pass_norm"
         die "cryptsetup open failed on $ROOT_PART"
     fi
+    bind_luks_tpm2 "$pass_norm"
     rm -f -- "$pass_norm"
     LUKS_OPENED=1
     mapper="/dev/mapper/$LUKS_NAME"
@@ -1348,6 +1462,23 @@ open_luks_root() {
             ;;
     esac
     export EXTRA_KARGS
+}
+
+# Seal a third keyslot to this machine's TPM2 (clevis tpm2 pin). The
+# initramfs clevis module (compose WITH_TPM2=1) opens it without asking;
+# the GRUB cryptomount prompt remains, so boot asks once. PCR 7 binds to
+# the Secure Boot state: a firmware/key change falls back to the passphrase.
+bind_luks_tpm2() {
+    local pass_norm="$1" cfg
+    if [[ "$LUKS_TPM2" != "1" ]]; then
+        return 0
+    fi
+    cfg="$(printf '{"pcr_bank":"sha256","pcr_ids":"%s"}' "$TPM2_PCRS")"
+    log "==> clevis luks bind tpm2 (PCRs $TPM2_PCRS)"
+    if ! clevis luks bind -y -k "$pass_norm" -d "$ROOT_PART" tpm2 "$cfg"; then
+        rm -f -- "$pass_norm"
+        die "clevis luks bind failed on $ROOT_PART (TPM2 present? tree built with WITH_TPM2=1?)"
+    fi
 }
 
 deployment_etc_dir() {
@@ -1492,4 +1623,7 @@ main() {
     write_summary
 }
 
-main "$@"
+# Tests source this file with VOIDLING_NO_MAIN=1 to exercise functions.
+if [[ "${VOIDLING_NO_MAIN:-0}" != "1" ]]; then
+    main "$@"
+fi

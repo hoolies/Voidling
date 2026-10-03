@@ -34,6 +34,7 @@ Environment:
   IGNOREPKGS                forwarded to plasma compose only
   BOOTABLE                  1=compose the plasma base with kernel, GRUB, and dracut
   WITH_ZFS                  forwarded to the plasma base (default: 1)
+  WITH_TPM2                 forwarded to the plasma base (default: 0)
   OUT_DIR                   output directory (default: <repo>/out)
   TARGET_ARCH               architecture (default: x86_64)
   TARGET_LIBC               libc (default: glibc)
@@ -103,6 +104,7 @@ compose_plasma_base() {
         export REPO_CURRENT REPO_CURRENT_NONFREE
         export BOOTABLE="${BOOTABLE:-0}"
         export WITH_ZFS="${WITH_ZFS:-1}"
+        export WITH_TPM2="${WITH_TPM2:-0}"
         SKIP_SEAL=1 bash -- "$ROOT_DIR/tooling/compose/compose-plasma-rootfs.sh"
     )
 }

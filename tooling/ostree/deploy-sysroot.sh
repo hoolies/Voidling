@@ -3,7 +3,7 @@
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
-unset -f mkdir ostree rm mv printf cat id find mktemp cd pwd grep ln \
+unset -f mkdir ostree rm mv printf cat id find mktemp cd pwd grep ln tr \
     stat readlink dirname basename date 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
@@ -51,6 +51,16 @@ Environment:
   OSTREE_BOOTLOADER  bootloader backend (default: none)
   INIT_FS_MODERN     1=ostree admin init-fs --modern (default: 0)
   RETAIN             1=keep previous deployments (default: 0)
+  OSTREE_SIGN_VERIFY 0 disables ed25519 verification (default: 1 when a key
+                     is found)
+  OSTREE_SIGN_PUBKEY base64 ed25519 public key (inline)
+  OSTREE_SIGN_PUBKEY_FILE
+                     file with the base64 key; defaults to
+                     OUT_DIR/ostree-keys/ed25519.public, then
+                     /usr/share/ostree/trusted.ed25519.d/voidling.ed25519
+
+The remote is created with the key inline (verification-ed25519-key), so
+voidling-upgrade on the deployed system verifies every later pull too.
 EOF
 }
 
@@ -315,7 +325,7 @@ file_url() {
 }
 
 pull_ref() {
-    local url
+    local url pubkey
     url="$(file_url "$SOURCE_REPO_ABS")"
     log "==> pulling ref into sysroot repo"
     log "    source: $SOURCE_REPO_ABS ($SOURCE_REPO_MODE)"
@@ -323,19 +333,21 @@ pull_ref() {
     log "    remote: $OSTREE_REMOTE"
     log "    ref:    $OSTREE_REF"
 
-    # Prefer ed25519 verify when a public key is configured; otherwise lab
-    # installs keep --no-gpg-verify (see tooling/ostree/ensure-signing-keys.sh).
-    if [[ -n "${OSTREE_SIGN_PUBKEY:-}" ]]; then
-        ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists \
-            --sign-verify="ed25519=${OSTREE_SIGN_PUBKEY}" \
+    # ed25519 verification: the remote carries the key inline so the installed
+    # system's voidling-upgrade keeps verifying without any extra files.
+    pubkey="$(resolve_sign_pubkey)"
+    if [[ -n "$pubkey" ]]; then
+        ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists --no-gpg-verify \
+            --sign-verify="ed25519=inline:${pubkey}" \
+            "$OSTREE_REMOTE" "$url" ||
+            die "remote add with --sign-verify failed (ostree too old? set OSTREE_SIGN_VERIFY=0)"
+        log "    verify: ed25519 (inline public key)"
+    else
+        ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists --no-gpg-verify --no-sign-verify \
             "$OSTREE_REMOTE" "$url" 2>/dev/null ||
             ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists --no-gpg-verify \
                 "$OSTREE_REMOTE" "$url"
-        log "    verify: ed25519 (OSTREE_SIGN_PUBKEY)"
-    else
-        ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists --no-gpg-verify \
-            "$OSTREE_REMOTE" "$url"
-        log "    verify: disabled (set OSTREE_SIGN_PUBKEY to enforce)"
+        log "    verify: disabled (no public key found; set OSTREE_SIGN_PUBKEY or OSTREE_SIGN_PUBKEY_FILE)"
     fi
 
     if ostree --repo="$SYSROOT_DIR/ostree/repo" pull "$OSTREE_REMOTE" "$OSTREE_REF"; then
@@ -343,9 +355,36 @@ pull_ref() {
         return 0
     fi
 
+    if [[ -n "$pubkey" ]]; then
+        die "signed pull failed for $OSTREE_REF (unsigned or foreign commit?). Re-commit with OSTREE_SIGN=1, or set OSTREE_SIGN_VERIFY=0 for a lab deploy."
+    fi
     log "==> file:// pull failed; falling back to pull-local"
     ostree --repo="$SYSROOT_DIR/ostree/repo" pull-local "$SOURCE_REPO_ABS" "$OSTREE_REF"
     PULL_REFSPEC="$OSTREE_REF"
+}
+
+resolve_sign_pubkey() {
+    # Order: explicit inline key, explicit file, build host keys, keys shipped
+    # in the live/compose tree. Prints the base64 key or nothing.
+    local f
+    if [[ "${OSTREE_SIGN_VERIFY:-1}" == "0" ]]; then
+        return 0
+    fi
+    if [[ -n "${OSTREE_SIGN_PUBKEY:-}" ]]; then
+        printf '%s\n' "$OSTREE_SIGN_PUBKEY"
+        return 0
+    fi
+    for f in \
+        "${OSTREE_SIGN_PUBKEY_FILE:-}" \
+        "${OSTREE_KEYS_DIR:-${OUT_DIR:-$ROOT_DIR/out}/ostree-keys}/ed25519.public" \
+        /usr/share/ostree/trusted.ed25519.d/voidling.ed25519 \
+        /etc/ostree/trusted.ed25519.d/voidling.ed25519; do
+        if [[ -n "$f" && -r "$f" ]]; then
+            tr -d '[:space:]' <"$f"
+            printf '\n'
+            return 0
+        fi
+    done
 }
 
 write_origin_file() {

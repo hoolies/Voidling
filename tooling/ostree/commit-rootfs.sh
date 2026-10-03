@@ -3,7 +3,7 @@
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
-unset -f mkdir ostree date printf cat 2>/dev/null || true
+unset -f mkdir ostree date printf cat tr base64 wc grep mktemp rm 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
 export LC_ALL=C
@@ -31,6 +31,12 @@ Environment:
   VERSION         metadata version string (default: UTC timestamp)
   SUBJECT         commit subject (default: Voidling rootfs VERSION)
   OSTREE_BOOTABLE auto, 1, or 0 (default: auto; 1 if the tree has vmlinuz)
+  OSTREE_SIGN     auto (default: ed25519-sign when OUT_DIR/ostree-keys exists
+                  or can be generated), 1 (signing required), 0 (never)
+  OSTREE_KEYS_DIR key directory (default: OUT_DIR/ostree-keys); see
+                  tooling/ostree/ensure-signing-keys.sh
+
+Signed commits are verified with ed25519.public right after the commit.
 EOF
 }
 
@@ -144,37 +150,72 @@ want_bootable_commit() {
     esac
 }
 
+signing_public_key_file() {
+    printf '%s\n' "${OSTREE_KEYS_DIR:-$OUT_DIR/ostree-keys}/ed25519.public"
+}
+
 maybe_sign_args() {
-    local secret keys_dir
-    # Default off until keys are a full 64-byte ed25519 secret (hex). Opt in
-    # with OSTREE_SIGN=1 after tooling/ostree/ensure-signing-keys.sh.
-    case "${OSTREE_SIGN:-0}" in
-        0 | no | false | NO | FALSE | '')
+    local secret keys_dir mode
+    # OSTREE_SIGN: auto (default; sign when keys exist or can be generated),
+    # 1 (required: fail when signing is impossible), 0 (never sign).
+    mode="${OSTREE_SIGN:-auto}"
+    case "$mode" in
+        0 | no | false | NO | FALSE)
+            log "    signing: disabled (OSTREE_SIGN=0)"
             return 0
+            ;;
+        1 | yes | true | YES | TRUE | auto | '') ;;
+        *)
+            die "OSTREE_SIGN must be auto, 1, or 0 (got: $mode)"
             ;;
     esac
     keys_dir="${OSTREE_KEYS_DIR:-$OUT_DIR/ostree-keys}"
     secret="$keys_dir/ed25519.secret"
-    if [[ ! -f "$secret" ]]; then
-        if [[ -x "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" ]]; then
-            bash -- "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" >/dev/null || true
-        fi
+    if [[ ! -f "$secret" && -x "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" ]]; then
+        OSTREE_KEYS_DIR="$keys_dir" bash -- "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" >/dev/null 2>&1 || true
     fi
-    if [[ -f "$secret" ]]; then
-        local hex
-        hex="$(tr -d '[:space:]' <"$secret")"
-        # libostree expects 64-byte secret as 128 hex chars.
-        if [[ "${#hex}" -ne 128 ]]; then
-            log "    signing: skipped (ed25519.secret must be 128 hex chars, got ${#hex})"
+    if [[ ! -r "$secret" ]]; then
+        if [[ "$mode" == "auto" ]]; then
+            log "    signing: skipped (no readable $secret; run tooling/ostree/ensure-signing-keys.sh)"
             return 0
         fi
-        if ostree --repo="$OSTREE_REPO_DIR" commit --help 2>&1 | grep -q sign-type; then
-            printf '%s\n' "--sign-type=ed25519" "--sign=$hex"
-            log "    signing: ed25519 ($secret)"
+        die "OSTREE_SIGN=1 but $secret is missing or unreadable"
+    fi
+    # libostree wants the 64-byte secret base64-encoded.
+    if [[ "$(tr -d '[:space:]' <"$secret" | base64 -d 2>/dev/null | wc -c)" -ne 64 ]]; then
+        if [[ "$mode" == "auto" ]]; then
+            log "    signing: skipped (ed25519.secret is not a 64-byte base64 key; rerun ensure-signing-keys.sh)"
             return 0
         fi
+        die "ed25519.secret is not a 64-byte base64 key"
     fi
-    log "    signing: skipped (set OSTREE_SIGN=1 and keys under $keys_dir)"
+    if ! ostree commit --help 2>&1 | grep -q -- '--sign-from-file'; then
+        if [[ "$mode" == "auto" ]]; then
+            log "    signing: skipped (ostree lacks --sign-from-file)"
+            return 0
+        fi
+        die "this ostree lacks --sign-from-file"
+    fi
+    printf '%s\n' "--sign-type=ed25519" "--sign-from-file=$secret"
+    log "    signing: ed25519 (secret from $secret)"
+}
+
+verify_commit_signature() {
+    local commit="$1" pub
+    pub="$(signing_public_key_file)"
+    if [[ ! -r "$pub" ]]; then
+        log "    verify: skipped (no public key at $pub)"
+        return 0
+    fi
+    if ostree --repo="$OSTREE_REPO_DIR" sign --verify --sign-type=ed25519 \
+        --keys-file="$pub" "$commit" >/dev/null 2>&1; then
+        log "    verify: ed25519 signature OK ($pub)"
+        return 0
+    fi
+    if [[ "${OSTREE_SIGN:-auto}" == "1" ]]; then
+        die "commit $commit does not verify against $pub"
+    fi
+    log "    verify: WARNING commit does not verify against $pub"
 }
 
 commit_rootfs() {
@@ -202,6 +243,11 @@ commit_rootfs() {
     local err
     err="$(mktemp -- "${TMPDIR:-/tmp}/voidling-ostree-commit.XXXXXX")"
     if ! commit_hash="$(ostree "${commit_args[@]}" 2>"$err")"; then
+        if [[ "${#sign_args[@]}" -gt 0 && "${OSTREE_SIGN:-auto}" == "1" ]]; then
+            cat -- "$err" >&2 || true
+            rm -f -- "$err"
+            die "signed ostree commit failed and OSTREE_SIGN=1 forbids an unsigned fallback"
+        fi
         if [[ "${#sign_args[@]}" -gt 0 ]]; then
             log "warning: signed commit failed; retrying without signature"
             cat -- "$err" >&2 || true
@@ -225,6 +271,9 @@ commit_rootfs() {
     fi
     rm -f -- "$err"
     [[ -n "$commit_hash" ]] || die "ostree commit produced no hash"
+    if [[ "${#sign_args[@]}" -gt 0 ]]; then
+        verify_commit_signature "$commit_hash"
+    fi
     printf '%s\n' "$commit_hash"
 }
 

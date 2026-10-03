@@ -10,8 +10,8 @@ set -euo pipefail
 unalias -a 2>/dev/null || true
 unset -f printf cat mkdir rm cp mv mount umount losetup mkfs.vfat \
     grub-mkrescue grub-mkstandalone xorriso mksquashfs mmd mcopy \
-    find id date stat readlink basename dirname truncate command \
-    sleep sort tail awk grep lsinitrd chmod ln 2>/dev/null || true
+    find id date stat readlink basename dirname truncate command gpg \
+    sleep sort tail awk grep lsinitrd chmod chown ln 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
 export LC_ALL=C
@@ -33,6 +33,12 @@ WORK_DIR=""
 MOUNTS=()
 SQUASH_ETC_RESTORED=0
 LIVE_INSTALLER_INSTALLED=0
+SECURE_BOOT="${SECURE_BOOT:-0}"
+SECURE_BOOT_GPG="${SECURE_BOOT_GPG:-1}"
+SB_KEYS_DIR=""
+SB_TOOLS=""
+SB_GPG_HOME=""
+SQUASHFS_COMP="${SQUASHFS_COMP:-xz}"
 
 usage() {
     cat <<EOF
@@ -54,6 +60,10 @@ Mandatory arguments to long options are mandatory for short options too.
                         pack FILE as live/filesystem.squashfs instead of
                         running mksquashfs on the rootfs
       --no-squashfs     skip the squashfs payload (GRUB + kernel only)
+      --secure-boot     sign GRUB and the kernel for UEFI Secure Boot with
+                        the Voidling key (out/secureboot-keys); ship the
+                        certificate for firmware enrollment (default: off)
+      --no-secure-boot  plain unsigned ISO (default)
   -h, --help            display this help and exit
 
 Host tools (one ISO path is enough):
@@ -85,6 +95,19 @@ Environment:
   VARIANT        product variant: minimal or plasma (default: minimal)
   LIVE_INITRD    same as --initrd
   SQUASHFS_FILE  existing squashfs to copy instead of packing the rootfs
+  SQUASHFS_COMP  mksquashfs compressor: xz (default, smallest) or zstd
+  SECURE_BOOT    1 = same as --secure-boot (default: 0)
+  SECURE_BOOT_GPG
+                 1 = GRUB also enforces OpenPGP signatures on the kernel,
+                 initrd, and its own config (default: 1 with --secure-boot)
+  SECUREBOOT_KEYS_DIR
+                 key directory (default: OUT_DIR/secureboot-keys)
+
+Secure Boot (opt-in): the EFI-only xorriso path is used, GRUB is built
+standalone with --disable-shim-lock (no shim) and signed with sbsign, the
+kernel is sbsign-ed too, and EFI/voidling/keys/ carries voidling-sb.cer /
+.esl / .auth for the firmware. Enroll voidling-sb.cer (or .auth) into db
+(or as PK in setup mode) once; see tooling/boot/SECURE-BOOT.md.
 EOF
 }
 
@@ -172,6 +195,14 @@ parse_args() {
                 WANT_SQUASHFS=0
                 shift
                 ;;
+            --secure-boot)
+                SECURE_BOOT=1
+                shift
+                ;;
+            --no-secure-boot)
+                SECURE_BOOT=0
+                shift
+                ;;
             --)
                 shift
                 if [[ $# -gt 0 ]]; then
@@ -236,7 +267,117 @@ resolve_defaults() {
     if [[ -n "$SQUASHFS_FILE" && "$WANT_SQUASHFS" -ne 0 ]]; then
         WANT_SQUASHFS=2
     fi
+    case "$SECURE_BOOT" in
+        0 | 1) ;;
+        *)
+            die "SECURE_BOOT must be 0 or 1 (got: $SECURE_BOOT)"
+            ;;
+    esac
+    case "$SQUASHFS_COMP" in
+        xz | zstd) ;;
+        *)
+            die "SQUASHFS_COMP must be xz or zstd (got: $SQUASHFS_COMP)"
+            ;;
+    esac
 }
+
+# --- Secure Boot ------------------------------------------------------------
+
+sb_tool() {
+    local name="$1"
+    if [[ -n "$SB_TOOLS" && -x "$SB_TOOLS/$name" ]]; then
+        printf '%s\n' "$SB_TOOLS/$name"
+        return 0
+    fi
+    command -v "$name" >/dev/null 2>&1 || die "Secure Boot tool missing: $name (run tooling/boot/ensure-secureboot-tools.sh)"
+    command -v "$name"
+}
+
+prepare_secure_boot() {
+    if [[ "$SECURE_BOOT" != "1" ]]; then
+        return 0
+    fi
+    log "==> Secure Boot: preparing keys and tools"
+    SB_TOOLS="$(bash -- "$ROOT_DIR/tooling/boot/ensure-secureboot-tools.sh")"
+    SB_KEYS_DIR="$(SECUREBOOT_TOOLS="$SB_TOOLS" bash -- "$ROOT_DIR/tooling/boot/ensure-secureboot-keys.sh")"
+    [[ -f "$SB_KEYS_DIR/voidling-sb.key" && -f "$SB_KEYS_DIR/voidling-sb.crt" ]] ||
+        die "Secure Boot key material missing under $SB_KEYS_DIR"
+    if [[ "$SECURE_BOOT_GPG" == "1" ]]; then
+        need gpg
+        SB_GPG_HOME="$SB_KEYS_DIR/gnupg"
+        [[ -f "$SB_KEYS_DIR/voidling-grub.gpg" ]] || die "GRUB GPG public key missing: $SB_KEYS_DIR/voidling-grub.gpg"
+    fi
+    need grub-mkstandalone
+    need xorriso
+    need mkfs.vfat
+    sb_tool sbsign >/dev/null
+    sb_tool sbverify >/dev/null
+}
+
+sb_sign_pe() {
+    # Authenticode-sign a PE/EFI binary in place with the Voidling key.
+    local file="$1" sbsign sbverify
+    sbsign="$(sb_tool sbsign)"
+    sbverify="$(sb_tool sbverify)"
+    "$sbsign" --key "$SB_KEYS_DIR/voidling-sb.key" --cert "$SB_KEYS_DIR/voidling-sb.crt" \
+        --output "$file.signed" "$file" >/dev/null 2>&1 ||
+        die "sbsign failed for $file"
+    mv -f -- "$file.signed" "$file"
+    "$sbverify" --cert "$SB_KEYS_DIR/voidling-sb.crt" "$file" >/dev/null 2>&1 ||
+        die "sbverify failed for $file"
+    log "    signed (sbsign): ${file##*/}"
+}
+
+sb_gpg_sign() {
+    # Detached OpenPGP signature next to FILE (FILE.sig) for GRUB's pgp verifier.
+    local file="$1"
+    if [[ "$SECURE_BOOT" != "1" || "$SECURE_BOOT_GPG" != "1" ]]; then
+        return 0
+    fi
+    rm -f -- "$file.sig"
+    gpg --homedir "$SB_GPG_HOME" --batch --quiet --yes --detach-sign \
+        --output "$file.sig" "$file" ||
+        die "gpg detach-sign failed for $file"
+    log "    signed (gpg):    ${file##*/}.sig"
+}
+
+write_sbat_csv() {
+    # SBAT metadata: required by shim-based loaders, harmless otherwise.
+    local dest="$1" grub_ver
+    grub_ver="$(grub-mkstandalone --version 2>/dev/null | awk '{print $NF}')"
+    {
+        printf '%s\n' 'sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md'
+        printf 'grub,4,Free Software Foundation,grub,%s,https://www.gnu.org/software/grub/\n' "${grub_ver:-2.12}"
+        printf '%s\n' 'grub.voidling,1,Voidling,grub,0.1,https://github.com/voidling'
+    } >"$dest"
+}
+
+copy_sb_enrollment_files() {
+    # Public enrollment material only (never the private key / gnupg).
+    local dest="$1" f
+    if [[ "$SECURE_BOOT" != "1" ]]; then
+        return 0
+    fi
+    mkdir -p -- "$dest"
+    for f in voidling-sb.cer voidling-sb.crt voidling-sb.esl voidling-sb.auth voidling-grub.gpg; do
+        if [[ -f "$SB_KEYS_DIR/$f" ]]; then
+            cp -- "$SB_KEYS_DIR/$f" "$dest/$f"
+        fi
+    done
+    {
+        printf '%s\n' "Voidling Secure Boot enrollment"
+        printf '%s\n' ""
+        printf '%s\n' "This medium is signed with the Voidling key (no Microsoft shim)."
+        printf '%s\n' "Enroll ONE of these in the firmware, then boot the medium:"
+        printf '%s\n' "  voidling-sb.cer   DER certificate  -> db (most firmware 'enroll from file')"
+        printf '%s\n' "  voidling-sb.auth  signed EFI list  -> db / KEK / PK (setup mode, KeyTool)"
+        printf '%s\n' "  voidling-sb.esl   raw EFI list     -> db (KeyTool / efi-updatevar)"
+        printf '%s\n' "voidling-grub.gpg is the OpenPGP key GRUB uses to verify kernel/initrd."
+        printf '%s\n' "Details: tooling/boot/SECURE-BOOT.md in the Voidling repository."
+    } >"$dest/README.txt"
+}
+
+# ---------------------------------------------------------------------------
 
 absolutize_new_file() {
     local p="$1"
@@ -563,7 +704,7 @@ install_live_installer() {
     done
     {
         printf 'VARIANT=%s\n' "$VARIANT"
-        printf '%s\n' "FILESYSTEM=btrfs"
+        printf '%s\n' "FILESYSTEM=auto"
         printf 'OUT_DIR=%s\n' "$LIVE_OUT_DIR"
     } >"$dest/live.env"
     write_live_wrapper "$ROOTFS_DIR/usr/bin/voidling-installer" "voidling-installer"
@@ -693,6 +834,12 @@ write_iso_readme() {
         printf '%s\n' "  /boot/grub/grub.cfg           GRUB menu (live + debug + rescue)"
         printf '  /%s/%s     live + installer payload (optional)\n' "$LIVE_DIR" "$LIVE_SQUASH"
         printf '%s\n' "  /EFI/BOOT/BOOTX64.EFI         UEFI fallback path (when used)"
+        if [[ "$SECURE_BOOT" == "1" ]]; then
+            printf '%s\n' "  /EFI/voidling/keys/           Secure Boot enrollment (cer/esl/auth)"
+            printf '%s\n' ""
+            printf '%s\n' "Secure Boot: GRUB and the kernel are signed with the Voidling key."
+            printf '%s\n' "Enroll EFI/voidling/keys/voidling-sb.cer in the firmware db first."
+        fi
         printf '%s\n' ""
         printf '%s\n' "Live kargs: rd.live.image rd.overlay"
         printf '  rd.live.dir=%s rd.live.squashimg=%s root=live:CDLABEL=%s\n' \
@@ -736,6 +883,14 @@ copy_boot_files() {
     if [[ -n "$INITRD_SRC" ]]; then
         cp -L -- "$INITRD_SRC" "$iso_boot/initrd"
     fi
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        chmod 0644 -- "$iso_boot/vmlinuz"
+        sb_sign_pe "$iso_boot/vmlinuz"
+        sb_gpg_sign "$iso_boot/vmlinuz"
+        if [[ -n "$INITRD_SRC" ]]; then
+            sb_gpg_sign "$iso_boot/initrd"
+        fi
+    fi
 }
 
 restore_etc_for_squashfs() {
@@ -751,6 +906,28 @@ restore_etc_for_squashfs() {
     log "==> restoring /etc from /usr/etc for squashfs (temporary)"
     cp -a -- "$ROOTFS_DIR/usr/etc" "$ROOTFS_DIR/etc"
     SQUASH_ETC_RESTORED=1
+}
+
+# Append USER to GROUP in a group(5) file. An empty members field must become
+# "user", not ",user" — a leading comma leaves the account out of the group
+# (sudo %wheel then never matches, and sudo asks for a dummy password).
+add_group_member() {
+    local file="$1" group="$2" user="$3"
+    local members
+    [[ -f "$file" ]] || return 0
+    if ! grep -q "^${group}:" -- "$file"; then
+        printf '%s\n' "${group}:x:4:${user}" >>"$file"
+        return 0
+    fi
+    members="$(awk -F: -v g="$group" '$1 == g { print $4; exit }' "$file")"
+    case ",${members}," in
+        *,"${user}",*) return 0 ;;
+    esac
+    if [[ -z "$members" ]]; then
+        sed -i "s/^${group}:\\([^:]*\\):\\([^:]*\\):.*$/${group}:\\1:\\2:${user}/" -- "$file"
+    else
+        sed -i "s/^${group}:\\([^:]*\\):\\([^:]*\\):.*$/${group}:\\1:\\2:${members},${user}/" -- "$file"
+    fi
 }
 
 enable_live_serial_getty() {
@@ -774,8 +951,11 @@ enable_live_serial_getty() {
     fi
     ln -sfn -- /etc/sv/agetty-ttyS0 "$link"
     log "    enabled agetty-ttyS0 in live squashfs /etc"
-    # Live session: voidling / voidling (not empty root). Change via
-    # voidling-set-credentials --change-password.
+    # Live session: voidling / voidling; root has NO password (empty shadow
+    # field, Void PAM carries nullok). The live medium is read-only and the
+    # session is throwaway, so an empty root is the rescue-friendly choice.
+    # Installed systems never inherit this: configure-system.sh writes its
+    # own shadow entries (root locked unless VOIDLING_ROOT_ACCESS=password).
     mkdir -p -- "$ROOTFS_DIR/etc/voidling" "$ROOTFS_DIR/home/voidling" \
         "$ROOTFS_DIR/etc/sudoers.d"
     : >"$ROOTFS_DIR/etc/voidling/live-session"
@@ -793,34 +973,37 @@ EOF
         if ! grep -q '^voidling:' -- "$ROOTFS_DIR/etc/group"; then
             printf '%s\n' 'voidling:x:1000:' >>"$ROOTFS_DIR/etc/group"
         fi
-        if grep -q '^wheel:' -- "$ROOTFS_DIR/etc/group"; then
-            if ! grep -q '^wheel:.*voidling' -- "$ROOTFS_DIR/etc/group"; then
-                sed -i 's/^wheel:\([^:]*\):\([^:]*\):\(.*\)$/wheel:\1:\2:\3,voidling/; t; s/^wheel:\([^:]*\):\([^:]*\):$/wheel:\1:\2:voidling/' \
-                    -- "$ROOTFS_DIR/etc/group" || true
-            fi
-        else
-            printf '%s\n' 'wheel:x:4:voidling' >>"$ROOTFS_DIR/etc/group"
-        fi
+        add_group_member "$ROOTFS_DIR/etc/group" wheel voidling
     fi
     if [[ -f "$ROOTFS_DIR/etc/shadow" ]]; then
         if grep -q '^root:' -- "$ROOTFS_DIR/etc/shadow"; then
-            sed -i "s|^root:[^:]*:|root:${hash}:|" -- "$ROOTFS_DIR/etc/shadow" || true
+            sed -i "s|^root:[^:]*:|root::|" -- "$ROOTFS_DIR/etc/shadow" || true
         else
-            printf 'root:%s:%s:0:99999:7:::\n' "$hash" "$days" >>"$ROOTFS_DIR/etc/shadow"
+            printf 'root::%s:0:99999:7:::\n' "$days" >>"$ROOTFS_DIR/etc/shadow"
         fi
         if grep -q '^voidling:' -- "$ROOTFS_DIR/etc/shadow"; then
             sed -i "s|^voidling:[^:]*:|voidling:${hash}:|" -- "$ROOTFS_DIR/etc/shadow" || true
         else
             printf 'voidling:%s:%s:0:99999:7:::\n' "$hash" "$days" >>"$ROOTFS_DIR/etc/shadow"
         fi
-        log "    live login: voidling / voidling (and root); change with voidling-set-credentials"
+        log "    live login: voidling / voidling; root has no password (live only)"
     fi
-    printf '%s\n' '%wheel ALL=(ALL:ALL) ALL' >"$ROOTFS_DIR/etc/sudoers.d/voidling-wheel"
+    # Live only: let the empty root password pass on the console.
+    if [[ -f "$ROOTFS_DIR/etc/login.defs" ]] && ! grep -q '^PREVENT_NO_AUTH' -- "$ROOTFS_DIR/etc/login.defs"; then
+        printf '%s\n' 'PREVENT_NO_AUTH no' >>"$ROOTFS_DIR/etc/login.defs"
+    fi
+    {
+        printf '%s\n' 'voidling ALL=(ALL:ALL) NOPASSWD: ALL'
+        printf '%s\n' '%wheel ALL=(ALL:ALL) NOPASSWD: ALL'
+    } >"$ROOTFS_DIR/etc/sudoers.d/voidling-wheel"
     chmod 0440 -- "$ROOTFS_DIR/etc/sudoers.d/voidling-wheel"
+    if [[ "$(id -u)" -eq 0 ]]; then
+        chown root:root -- "$ROOTFS_DIR/etc/sudoers.d/voidling-wheel"
+    fi
     if [[ -f "$ROOTFS_DIR/etc/issue" ]]; then
         {
-            printf '%s\n' "Live login: voidling / voidling"
-            printf '%s\n' "Change password: sudo voidling-set-credentials --change-password"
+            printf '%s\n' "Live login: voidling / voidling (root is passwordless, live only)"
+            printf '%s\n' "Set your own: sudo voidling-set-credentials --change-password"
         } >>"$ROOTFS_DIR/etc/issue"
     fi
 }
@@ -862,7 +1045,11 @@ maybe_squashfs() {
     log "==> packing squashfs payload"
     # Keep empty proc/sys/dev/run/tmp directories. Excluding those names
     # drops the mount points and runit cannot mount /proc after switch_root.
-    mksquashfs "$ROOTFS_DIR" "$dest" -noappend -comp xz
+    if [[ "$SQUASHFS_COMP" == "zstd" ]]; then
+        mksquashfs "$ROOTFS_DIR" "$dest" -noappend -comp zstd -Xcompression-level 19
+    else
+        mksquashfs "$ROOTFS_DIR" "$dest" -noappend -comp xz
+    fi
     remove_live_installer
     remove_temp_etc
 }
@@ -870,14 +1057,24 @@ maybe_squashfs() {
 populate_efi_img_mtools() {
     local img="$1"
     local efi_bin="$2"
+    local keys_dir="${3:-}" f
     mmd -i "$img" ::/EFI
     mmd -i "$img" ::/EFI/BOOT
     mcopy -i "$img" "$efi_bin" ::/EFI/BOOT/BOOTX64.EFI
+    if [[ -n "$keys_dir" && -d "$keys_dir" ]]; then
+        mmd -i "$img" ::/EFI/voidling
+        mmd -i "$img" ::/EFI/voidling/keys
+        for f in "$keys_dir"/*; do
+            [[ -f "$f" ]] || continue
+            mcopy -i "$img" "$f" "::/EFI/voidling/keys/${f##*/}"
+        done
+    fi
 }
 
 populate_efi_img_mount() {
     local img="$1"
     local efi_bin="$2"
+    local keys_dir="${3:-}"
     local mnt="$WORK_DIR/efi-mnt"
 
     if [[ "$(id -u)" -ne 0 ]]; then
@@ -888,32 +1085,66 @@ populate_efi_img_mount() {
     MOUNTS+=("$mnt")
     mkdir -p -- "$mnt/EFI/BOOT"
     cp -a -- "$efi_bin" "$mnt/EFI/BOOT/BOOTX64.EFI"
+    if [[ -n "$keys_dir" && -d "$keys_dir" ]]; then
+        mkdir -p -- "$mnt/EFI/voidling/keys"
+        cp -- "$keys_dir"/* "$mnt/EFI/voidling/keys/"
+    fi
     umount -- "$mnt"
     MOUNTS=()
+}
+
+grub_standalone_modules() {
+    # Everything grub.cfg needs must be built in: with Secure Boot + pgp
+    # enforcement, insmod from the memdisk would need per-module signatures.
+    local mods
+    mods="part_gpt part_msdos fat iso9660 search search_fs_file search_label linux normal serial terminal terminfo echo test"
+    if [[ "$SECURE_BOOT" == "1" && "$SECURE_BOOT_GPG" == "1" ]]; then
+        mods="$mods pgp gcry_sha256 gcry_sha512 gcry_rsa gcry_dsa"
+    fi
+    printf '%s\n' "$mods"
 }
 
 create_efi_img() {
     local img="$1"
     local cfg="$2"
     local efi_bin="$WORK_DIR/BOOTX64.EFI"
+    local keys_dir=""
+    local -a extra
 
     need grub-mkstandalone
+    extra=()
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        write_sbat_csv "$WORK_DIR/sbat.csv"
+        extra+=(--disable-shim-lock "--sbat=$WORK_DIR/sbat.csv")
+        if [[ "$SECURE_BOOT_GPG" == "1" ]]; then
+            cp -- "$cfg" "$WORK_DIR/embedded-grub.cfg"
+            sb_gpg_sign "$WORK_DIR/embedded-grub.cfg"
+            cfg="$WORK_DIR/embedded-grub.cfg"
+            extra+=("--pubkey=$SB_KEYS_DIR/voidling-grub.gpg" "boot/grub/grub.cfg.sig=$cfg.sig")
+        fi
+        keys_dir="$WORK_DIR/sb-enroll"
+        copy_sb_enrollment_files "$keys_dir"
+    fi
     grub-mkstandalone \
         --format=x86_64-efi \
         --output="$efi_bin" \
         --locales="" \
         --fonts="" \
-        --modules="part_gpt part_msdos fat iso9660 search search_fs_file search_label linux normal serial terminal echo test" \
+        --modules="$(grub_standalone_modules)" \
+        "${extra[@]}" \
         "boot/grub/grub.cfg=$cfg"
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        sb_sign_pe "$efi_bin"
+    fi
 
     rm -f -- "$img"
     truncate -s 16M -- "$img"
     mkfs.vfat -F 16 -n ESP "$img"
 
     if command -v mmd >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
-        populate_efi_img_mtools "$img" "$efi_bin"
+        populate_efi_img_mtools "$img" "$efi_bin" "$keys_dir"
     else
-        populate_efi_img_mount "$img" "$efi_bin"
+        populate_efi_img_mount "$img" "$efi_bin" "$keys_dir"
     fi
 }
 
@@ -942,6 +1173,9 @@ build_iso_xorriso() {
     if [[ -f "$WORK_DIR/BOOTX64.EFI" ]]; then
         cp -a -- "$efi_bin" "$ISO_WORK/EFI/BOOT/BOOTX64.EFI"
     fi
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        copy_sb_enrollment_files "$ISO_WORK/EFI/voidling/keys"
+    fi
 
     rm -f -- "$ISO_PATH"
     # -as mkisofs: the source directory is an mkisofs pathspec, not a
@@ -960,6 +1194,12 @@ build_iso_xorriso() {
 }
 
 build_iso() {
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        # grub-mkrescue writes its own unsigned EFI loader; only the
+        # standalone path can be signed.
+        build_iso_xorriso
+        return 0
+    fi
     if command -v grub-mkrescue >/dev/null 2>&1; then
         if build_iso_grub_mkrescue; then
             return 0
@@ -974,6 +1214,7 @@ main() {
     resolve_defaults
     require_iso_tools
     validate_inputs
+    prepare_secure_boot
 
     # Prefer OUT_DIR/tmp over /tmp (tmpfs) — OSTree repo payloads are multi-GB.
     OUT_DIR="${OUT_DIR:-$ROOT_DIR/out}"
@@ -1008,6 +1249,11 @@ main() {
     log "    label:  $ISO_LABEL"
     log "    tmpdir: $TMPDIR"
     log "    kernel: $KERNEL_SRC"
+    if [[ "$SECURE_BOOT" == "1" ]]; then
+        log "    secure boot: on (keys: $SB_KEYS_DIR; gpg: $SECURE_BOOT_GPG)"
+    else
+        log "    secure boot: off"
+    fi
     if [[ -n "$INITRD_SRC" ]]; then
         log "    initrd: $INITRD_SRC"
     fi

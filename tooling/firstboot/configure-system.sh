@@ -35,6 +35,7 @@ USER_NAME=""
 USER_UID=""
 USER_SHELL=""
 PASSWORD_HASH=""
+ROOT_ACCESS=""
 LOCALE_NAME=""
 SWAP_PLAN=0
 LUKS_PLAN=0
@@ -53,6 +54,9 @@ Mandatory arguments to long options are mandatory for short options too.
       --uid=N           numeric uid and primary gid (default: 1000)
       --shell=PATH      login shell (default: zsh, bash, or /bin/sh)
       --password-hash=H shadow password hash (default: locked)
+      --root-access=P   locked (root locked, user in wheel), password (root
+                        shares the user hash), none (root locked and the
+                        replacement user stays out of wheel) (default: locked)
       --locale=NAME     LANG value when glibc-locales is not ignored
       --swap            record optional swap in the storage plan (default: off)
       --luks            record optional LUKS in the storage plan (default: off)
@@ -66,6 +70,8 @@ Environment (flags override these):
   VOIDLING_UID            numeric uid
   VOIDLING_SHELL          login shell
   VOIDLING_PASSWORD_HASH  shadow hash
+  VOIDLING_ROOT_ACCESS    locked, password, or none (written to
+                          etc/voidling/root-access for set-credentials)
   VOIDLING_LOCALE         LANG when locales are available
   VARIANT                 minimal implies glibc-locales ignored
   SWAP / LUKS             1 to record optional storage extras
@@ -178,6 +184,15 @@ parse_args() {
                 PASSWORD_HASH="${1#*=}"
                 shift
                 ;;
+            --root-access)
+                require_arg "$1" "${2:-}"
+                ROOT_ACCESS="$2"
+                shift 2
+                ;;
+            --root-access=*)
+                ROOT_ACCESS="${1#*=}"
+                shift
+                ;;
             --locale)
                 require_arg "$1" "${2:-}"
                 LOCALE_NAME="$2"
@@ -231,6 +246,7 @@ apply_defaults() {
     USER_UID="${USER_UID:-${VOIDLING_UID:-$DEFAULT_UID}}"
     USER_SHELL="${USER_SHELL:-${VOIDLING_SHELL:-}}"
     PASSWORD_HASH="${PASSWORD_HASH:-${VOIDLING_PASSWORD_HASH:-!}}"
+    ROOT_ACCESS="${ROOT_ACCESS:-${VOIDLING_ROOT_ACCESS:-locked}}"
     LOCALE_NAME="${LOCALE_NAME:-${VOIDLING_LOCALE:-}}"
     if is_yes "${SWAP:-0}"; then
         SWAP_PLAN=1
@@ -265,6 +281,12 @@ validate_config() {
     if [[ "$USER_UID" -lt 1000 ]]; then
         die "uid must be >= 1000 (got: $USER_UID)"
     fi
+    case "$ROOT_ACCESS" in
+        locked | password | none) ;;
+        *)
+            die "root access must be locked, password, or none (got: $ROOT_ACCESS)"
+            ;;
+    esac
 }
 
 path_exists_under() {
@@ -586,9 +608,11 @@ configure_user() {
         ensure_line_file "$shadow_file" \
             "${USER_NAME}:${PASSWORD_HASH}:${days}:0:99999:7:::"
     fi
-    # Root gets the lab hash only when explicitly requested (CI / keep-lab images).
-    # Installed systems leave root locked; users replace voidling via set-credentials.
-    if [[ "${VOIDLING_SET_ROOT_PASSWORD:-0}" == "1" || "${VOIDLING_KEEP_LAB_CREDENTIALS:-0}" == "1" ]]; then
+    # Root gets the lab hash only when explicitly requested (CI / keep-lab images,
+    # or VOIDLING_ROOT_ACCESS=password). Installed systems otherwise leave root
+    # locked; users replace voidling via set-credentials.
+    if [[ "${VOIDLING_SET_ROOT_PASSWORD:-0}" == "1" || "${VOIDLING_KEEP_LAB_CREDENTIALS:-0}" == "1" ||
+        "$ROOT_ACCESS" == "password" ]]; then
         if [[ "$PASSWORD_HASH" != "!" && -f "$shadow_file" ]]; then
             if grep -q '^root:' -- "$shadow_file"; then
                 rewrite_colon_file "$shadow_file" root \
@@ -601,6 +625,9 @@ configure_user() {
         fi
     fi
 
+    # VOIDLING_ROOT_ACCESS=none: the user must not gain root. The lab account
+    # still needs wheel so the first-login credential replace can run; the
+    # replacement user created by voidling-set-credentials is kept out of wheel.
     add_user_to_group "$group_file" wheel "$USER_NAME"
     if [[ -n "$(group_gid "$group_file" sudo)" ]]; then
         add_user_to_group "$group_file" sudo "$USER_NAME"
@@ -742,6 +769,8 @@ configure_credential_policy() {
     fi
     voidling_etc="$ETC_DIR/voidling"
     mkdir -p -- "$voidling_etc"
+    printf '%s\n' "$ROOT_ACCESS" >"$voidling_etc/root-access"
+    log "    root access: $ROOT_ACCESS"
     if [[ "${VOIDLING_KEEP_LAB_CREDENTIALS:-0}" == "1" ]]; then
         : >"$voidling_etc/keep-lab-credentials"
         rm -f -- "$voidling_etc/require-credential-change"

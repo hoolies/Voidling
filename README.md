@@ -6,5 +6,5 @@ Project decisions are tracked in `docs/`. Start here:
 
 - `docs/README.md`
 
-Prototype tooling (early) will live under `tooling/`.
+Prototype tooling lives under `tooling/` (compose → OSTree commit → deploy → ISO/qcow2 → installer → upgrade). Build order: `docs/60-build-and-release.md`. Lint + unit tests: `bash tooling/ci.sh`.
 

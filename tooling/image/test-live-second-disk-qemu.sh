@@ -132,7 +132,7 @@ main() {
     log "==> QEMU live install over serial (Btrfs)"
     py="$(
         cat <<'PY'
-import os, pty, select, subprocess, sys, time
+import os, pty, select, signal, subprocess, sys, time
 
 root = os.environ["VOIDLING_ROOT"]
 iso = os.environ["ISO_PATH"]
@@ -148,7 +148,7 @@ cmd = [
 
 master, slave = pty.openpty()
 proc = subprocess.Popen(
-    cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True
+    cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True, start_new_session=True
 )
 os.close(slave)
 
@@ -195,11 +195,15 @@ def write_serial(data: bytes) -> None:
 try:
     wait_for(b"login:", "login prompt")
     time.sleep(1.0)
+    # Only a "Password:" printed after the username counts; /etc/issue text
+    # (e.g. "...--change-password") must not trigger an early send, because
+    # login(1) flushes typed-ahead input before it reads the password.
+    buf = b""  # drop banner/boot output; buf may be trimmed later, so no index
     write_serial(b"voidling\r")
     pw_deadline = time.time() + 30
     got_shell = False
     while time.time() < pw_deadline:
-        if b"Password:" in buf or b"password:" in buf:
+        if b"Password:" in buf:
             write_serial(b"voidling\r")
             break
         if b"-bash" in buf or b"$ " in buf or b"# " in buf:
@@ -259,11 +263,18 @@ sudo poweroff -f
             time.sleep(0.2)
 finally:
     if proc.poll() is None:
-        proc.terminate()
+        # Kill the whole session (wrapper + qemu), not just the wrapper.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     os.close(master)
 
 print("serial automation finished", file=sys.stderr)

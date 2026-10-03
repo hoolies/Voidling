@@ -16,11 +16,14 @@ SKIP_LUKS=0
 SKIP_LIVE=0
 SKIP_PLASMA_BOOT=0
 SKIP_LOGIN=0
+SKIP_SECUREBOOT=0
+SKIP_UNIT=0
 
 usage() {
     cat <<EOF
 Usage: $PROGNAME [OPTION]...
-Run Voidling smoke harnesses (upgrade, LUKS, live install, plasma boot, login).
+Run Voidling smoke harnesses (unit tests, upgrade, LUKS, live install,
+plasma boot, login, Secure Boot ISO).
 
 Mandatory arguments to long options are mandatory for short options too.
 
@@ -29,6 +32,8 @@ Mandatory arguments to long options are mandatory for short options too.
       --skip-live       skip live ISO → second-disk install
       --skip-plasma     skip plasma OSTree qcow2 boot check
       --skip-login      skip serial login with voidling/voidling
+      --skip-secureboot skip signed live ISO under enrolled OVMF Secure Boot
+      --skip-unit       skip non-root unit tests (tooling/ci.sh --tests-only)
   -h, --help            display this help and exit
 
 Must run as root. Individual harnesses live under tooling/{boot,image,installer}/.
@@ -77,6 +82,14 @@ parse_args() {
                 SKIP_LOGIN=1
                 shift
                 ;;
+            --skip-secureboot)
+                SKIP_SECUREBOOT=1
+                shift
+                ;;
+            --skip-unit)
+                SKIP_UNIT=1
+                shift
+                ;;
             --)
                 shift
                 if [[ $# -gt 0 ]]; then
@@ -110,7 +123,7 @@ check_login() {
     VOIDLING_ROOT="$ROOT_DIR" IMAGE_PATH="$image" LOG_FILE="$log_file" \
         LOGIN_TIMEOUT="${LOGIN_TIMEOUT:-180}" \
         python3 - <<'PY' || die "serial login failed (see $log_file)"
-import os, pty, select, subprocess, sys, time
+import os, pty, select, signal, subprocess, sys, time
 
 root = os.environ["VOIDLING_ROOT"]
 image = os.environ["IMAGE_PATH"]
@@ -121,7 +134,7 @@ cmd = [
     "--image", image, "--nographic", "--no-kvm",
 ]
 master, slave = pty.openpty()
-proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True, start_new_session=True)
 os.close(slave)
 buf = b""
 deadline = time.time() + timeout
@@ -156,15 +169,18 @@ try:
     else:
         raise SystemExit("timeout waiting for login:")
     time.sleep(0.5)
+    # Match only a "Password:" printed after the username (banner text such
+    # as "--change-password" must not count; login(1) flushes typed-ahead).
+    buf = b""  # drop banner/boot output; buf may be trimmed later, so no index
     os.write(master, b"voidling\r")
     time.sleep(0.4)
-    if b"Password:" in buf or b"password:" in buf.lower():
+    if b"Password:" in buf:
         os.write(master, b"voidling\r")
     else:
         # Wait for password prompt
         end = time.time() + 20
         while time.time() < end:
-            if b"Password:" in buf or b"password:" in buf:
+            if b"Password:" in buf:
                 os.write(master, b"voidling\r")
                 break
             r, _, _ = select.select([master], [], [], 0.5)
@@ -192,11 +208,18 @@ try:
         raise SystemExit("timeout waiting for shell after login")
 finally:
     if proc.poll() is None:
-        proc.terminate()
+        # Kill the whole session (wrapper + qemu), not just the wrapper.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     os.close(master)
 PY
     rm -f -- "$log_file"
@@ -229,6 +252,10 @@ main() {
     arch="$TARGET_ARCH"
     export OUT_DIR TARGET_ARCH
 
+    if [[ "$SKIP_UNIT" -eq 0 ]]; then
+        run_step unit-tests \
+            bash -- "$ROOT_DIR/tooling/ci.sh" --tests-only
+    fi
     if [[ "$SKIP_UPGRADE" -eq 0 ]]; then
         run_step upgrade-rollback \
             bash -- "$ROOT_DIR/tooling/boot/test-guest-upgrade-rollback.sh"
@@ -252,6 +279,10 @@ main() {
                 --variant=minimal --filesystem=btrfs -s 8G -o "$image"
         fi
         run_step serial-login check_login "$image"
+    fi
+    if [[ "$SKIP_SECUREBOOT" -eq 0 ]]; then
+        run_step secure-boot-iso \
+            bash -- "$ROOT_DIR/tooling/image/test-secureboot-iso.sh"
     fi
 
     log "==> all requested smokes ok"

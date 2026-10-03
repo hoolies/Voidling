@@ -167,6 +167,24 @@ copy_overlay() {
         cp -- "$pr_src" "$dest/usr/lib/ostree/prepare-root.conf"
     fi
     log "    module: $dest/usr/lib/dracut/modules.d/98voidling-ostree"
+    copy_tpm2_conf
+}
+
+# TPM2 auto-unlock (clevis). Only when the tree ships clevis (compose
+# WITH_TPM2=1): pull the non-systemd clevis dracut path and TPM drivers so
+# a LUKS slot bound with 'clevis luks bind tpm2' opens without a second
+# prompt. Trees without clevis get no snippet (dracut would fail on the
+# missing module).
+copy_tpm2_conf() {
+    local src dest
+    src="$OVERLAY_DIR/usr/lib/dracut/dracut.conf.d/51-voidling-tpm2.conf"
+    dest="$ROOTFS_DIR/usr/lib/dracut/dracut.conf.d/51-voidling-tpm2.conf"
+    if [[ -x "$ROOTFS_DIR/usr/bin/clevis-decrypt-tpm2" && -f "$src" ]]; then
+        cp -- "$src" "$dest"
+        log "    tpm2:   clevis present; $dest"
+    else
+        rm -f -- "$dest"
+    fi
 }
 
 modules_dir() {

@@ -15,6 +15,7 @@ readonly ROOT_DIR
 readonly DROPIN_SRC="${BOOT_DIR}/15_voidling"
 
 # shellcheck source=voidling-grub-esp.sh
+# shellcheck source=voidling-grub-esp.sh
 . "${BOOT_DIR}/voidling-grub-esp.sh"
 
 usage() {

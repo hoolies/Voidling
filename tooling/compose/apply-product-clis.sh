@@ -3,7 +3,7 @@
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
-unset -f mkdir cp ln chmod printf install 2>/dev/null || true
+unset -f mkdir cp ln chmod printf install tr bash 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
 export LC_ALL=C
@@ -141,6 +141,27 @@ install_tree() {
     write_wrapper "$bin/voidling-set-credentials" \
         "/usr/lib/voidling/tooling/firstboot/voidling-set-credentials.sh"
     log "    installed: voidling-upgrade voidling-rollback voidling-snapshot voidling-set-credentials"
+    install_ostree_trust
+}
+
+install_ostree_trust() {
+    # Ship the ed25519 public key so deploy/upgrade on the installed system
+    # (and the live ISO installer) can verify commits without the build host.
+    local dest="$ROOTFS_DIR" pub trust
+    pub="${OSTREE_KEYS_DIR:-${OUT_DIR:-$ROOT_DIR/out}/ostree-keys}/ed25519.public"
+    if [[ ! -r "$pub" && -x "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" ]]; then
+        bash -- "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" >/dev/null 2>&1 || true
+    fi
+    if [[ ! -r "$pub" ]]; then
+        log "    ostree trust: skipped (no public key at $pub)"
+        return 0
+    fi
+    trust="$dest/usr/share/ostree/trusted.ed25519.d"
+    mkdir -p -- "$trust"
+    tr -d '[:space:]' <"$pub" >"$trust/voidling.ed25519"
+    printf '\n' >>"$trust/voidling.ed25519"
+    chmod 0644 -- "$trust/voidling.ed25519"
+    log "    ostree trust: $trust/voidling.ed25519"
 }
 
 write_wrapper() {

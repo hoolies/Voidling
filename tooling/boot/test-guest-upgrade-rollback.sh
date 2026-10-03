@@ -170,8 +170,8 @@ main() {
     dep_cli="$(find -- "$MNT/ostree/deploy/voidling/deploy" -path '*/usr/bin/voidling-upgrade' -print -quit)"
     [[ -n "$dep_cli" ]] || die "voidling-upgrade missing from OSTree deployment"
     assert_has "$MNT/boot/grub.cfg"
-    grep -Fq '/@/boot' -- "$MNT/boot/grub.cfg" \
-        || die "grub.cfg missing /@/boot kernel paths"
+    grep -Fq '/@/boot' -- "$MNT/boot/grub.cfg" ||
+        die "grub.cfg missing /@/boot kernel paths"
 
     log "==> voidling-snapshot create (pre-upgrade)"
     local snap_name

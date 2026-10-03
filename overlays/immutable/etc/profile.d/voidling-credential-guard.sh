@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Voidling: on installed systems, first login as voidling must replace lab creds.
 # Sourced by login shells. Keep this file POSIX sh compatible.
 
