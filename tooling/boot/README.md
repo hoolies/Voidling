@@ -85,8 +85,11 @@ bash tooling/boot/voidling-rollback.sh \
 then fail at `deploy-sysroot.sh` unless a real archive repo is present.
 Dry-run is enough to exercise the fixture.
 
-No UEFI NVRAM write is performed. Generating `grub.cfg` + BLS (and a rollback
-pointer) is enough for the prototype.
+Disk apply (`install-voidling.sh` with `--i-understand-this-wipes-disks`) sets
+`APPLY_DISK=1` so `install-bootloader.sh` runs `grub-install` (removable EFI),
+writes `EFI/BOOT/grub.cfg` via `voidling-grub-esp.sh`, and generates
+`/boot/grub.cfg` with Btrfs paths under `/@/` when `FILESYSTEM=btrfs`.
+No UEFI NVRAM write is performed (`--removable --no-nvram`).
 
 ## Upgrade CLI
 
@@ -165,7 +168,7 @@ every upgrade, deploy, or rollback. No NVRAM update is required.
 Each synthesized entry includes (placeholders until deploy/installer fill them):
 
 ```
-root=UUID=VOIDLING-ROOT rw ostree=/ostree/boot.N/voidling/<bootcsum>/<serial>
+root=UUID=VOIDLING-ROOT rw ostree=/ostree/boot.N/voidling/<bootcsum>/<serial> zswap.enabled=0
 ```
 
 When `deploy-sysroot.sh` has already written BLS, we **reuse** its `options`

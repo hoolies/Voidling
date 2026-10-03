@@ -32,6 +32,8 @@ Environment:
   SKIP_PLASMA_COMPOSE       if set to 1, reuse an existing plasma rootfs
   SKIP_COPY                 if set to 1, do not copy plasma → fenestration rootfs
   IGNOREPKGS                forwarded to plasma compose only
+  BOOTABLE                  1=compose the plasma base with kernel, GRUB, and dracut
+  WITH_ZFS                  forwarded to the plasma base (default: 1)
   OUT_DIR                   output directory (default: <repo>/out)
   TARGET_ARCH               architecture (default: x86_64)
   TARGET_LIBC               libc (default: glibc)
@@ -99,6 +101,8 @@ compose_plasma_base() {
         unset PKGS VARIANT
         export OUT_DIR TARGET_ARCH TARGET_LIBC
         export REPO_CURRENT REPO_CURRENT_NONFREE
+        export BOOTABLE="${BOOTABLE:-0}"
+        export WITH_ZFS="${WITH_ZFS:-1}"
         SKIP_SEAL=1 bash -- "$ROOT_DIR/tooling/compose/compose-plasma-rootfs.sh"
     )
 }
@@ -185,6 +189,7 @@ main() {
     apply_overlay
     if [[ "${SKIP_SEAL:-0}" != "1" ]]; then
         bash -- "$ROOT_DIR/tooling/compose/apply-immutable-overlay.sh" -- "$ROOTFS_DIR"
+        bash -- "$ROOT_DIR/tooling/compose/apply-product-clis.sh" -- "$ROOTFS_DIR"
         bash -- "$ROOT_DIR/tooling/compose/finalize-ostree-tree.sh" -- "$ROOTFS_DIR"
     fi
 

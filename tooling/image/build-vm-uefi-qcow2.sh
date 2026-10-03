@@ -540,7 +540,7 @@ write_grub_cfg() {
         printf 'search --no-floppy --fs-uuid --set=root %s\n' "$ROOT_UUID"
         printf '%s\n' ""
         printf '%s\n' 'menuentry "Voidling" {'
-        printf '    linux /%s root=UUID=%s rw console=tty0 console=ttyS0\n' "$KERNEL_PATH" "$ROOT_UUID"
+        printf '    linux /%s root=UUID=%s rw zswap.enabled=0 console=tty0 console=ttyS0\n' "$KERNEL_PATH" "$ROOT_UUID"
         if [[ -n "$INITRD_PATH" ]]; then
             printf '    initrd /%s\n' "$INITRD_PATH"
         fi

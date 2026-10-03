@@ -94,7 +94,7 @@ Never: `xbps-install`, `xbps-reconfigure`, `cryptsetup`, `mkswap`, `mkfs`.
 `tooling/container/build-product-image.sh` (`voidling-minimal:local`).
 AppImage is last. No host xbps.
 
-## Plan-only flags (still a plan)
+## Plan-only vs disk-apply flags
 
 `--swap` and `--luks` (installer and `configure-system.sh`):
 
@@ -102,8 +102,10 @@ AppImage is last. No host xbps.
 - Directory mode: record `SWAP=` / `LUKS=` in `plan.env` and
   `etc/voidling/storage-plan.env`. Do not create a swap file, partition,
   or LUKS container. Dir mode must succeed with both flags unset.
-- A future disk installer (not this prototype) may consume the plan when
-  `SKIP_MKFS` is lifted. That work is **not** first-boot’s to implement.
+- Disk apply (`--i-understand-this-wipes-disks` + `--luks-passphrase-file`):
+  formats LUKS2 on the root partition, writes `crypttab`, and adds
+  `rd.luks.uuid=…` to kernel args. Disk swap partitions are still not created.
+- zram swap is the `voidling-zram` service. It does not read `SWAP`.
 
 ## What this folder will not do
 

@@ -272,8 +272,10 @@ print_plan() {
                 "  write $EXTRA_PKGS_FILE (one name per line; compose includes via PKGS)" \
                 "  write $GENERATION_DIR/${TEMPLATE}.meta" \
                 "  document binpkgs at $BINPKGS_DIR for a future compose -R hook" \
-                "  BEFORE compose/commit/activate: snapshot type $SNAPSHOT_TYPE" \
-                "  (snapshots are not implemented here)" \
+                "  BEFORE compose/commit/activate: $ROOT_DIR/tooling/snapshots/voidling-snapshot.sh" \
+                "    create --type $SNAPSHOT_TYPE" \
+                "  Default backend is dir under the generation directory (does not snapshot the host)." \
+                "  Set VOIDLING_FILESYSTEM=auto and VOIDLING_SYSROOT=/ on an installed host." \
                 ""
             ;;
         oci)
@@ -316,8 +318,26 @@ append_extra_pkg() {
     printf '%s\n' "$pkg" >>"$file"
 }
 
+run_sourcing_snapshot() {
+    local snap fs sysroot
+    local -a args
+    snap="$ROOT_DIR/tooling/snapshots/voidling-snapshot.sh"
+    [[ -x "$snap" ]] || die "snapshot CLI missing or not executable: $snap"
+    fs="${VOIDLING_FILESYSTEM:-dir}"
+    sysroot="${VOIDLING_SYSROOT:-$GENERATION_DIR}"
+    mkdir -p -- "$sysroot"
+    args=(--filesystem "$fs" --sysroot "$sysroot")
+    if [[ "$APPLY" -eq 1 ]]; then
+        args+=(--apply)
+    fi
+    log "snapshot hook: create --type $SNAPSHOT_TYPE (filesystem=$fs sysroot=$sysroot)"
+    "$snap" "${args[@]}" create --type "$SNAPSHOT_TYPE" --label "sourcing $TEMPLATE"
+    "$snap" "${args[@]}" prune
+}
+
 write_generation_export() {
     mkdir -p -- "$GENERATION_DIR"
+    run_sourcing_snapshot
     append_extra_pkg "$EXTRA_PKGS_FILE" "$TEMPLATE"
     {
         printf '%s\n' \
@@ -327,11 +347,10 @@ write_generation_export() {
             "binpkgs=$BINPKGS_DIR" \
             "void_packages=$VOID_PACKAGES_DIR" \
             "snapshot_hook=$SNAPSHOT_TYPE" \
-            "note=Call snapshot type $SNAPSHOT_TYPE before compose/commit/activate. Sourcing does not take snapshots."
+            "note=Snapshot type $SNAPSHOT_TYPE is taken by voidling-snapshot.sh before this export is used."
     } >"$GENERATION_DIR/${TEMPLATE}.meta"
     log "wrote $EXTRA_PKGS_FILE"
     log "wrote $GENERATION_DIR/${TEMPLATE}.meta"
-    log "snapshot hook (not implemented here): $SNAPSHOT_TYPE"
 }
 
 write_oci_export() {
@@ -574,8 +593,7 @@ apply_sourcing() {
         oci) maybe_run_oci_build ;;
         flatpak) maybe_run_flatpak_builder ;;
         generation)
-            log "generation list ready. Before compose/commit/activate:"
-            log "  snapshot type $SNAPSHOT_TYPE (not implemented in this tree)"
+            log "generation list ready. Snapshot type $SNAPSHOT_TYPE was requested before compose/commit/activate."
             ;;
     esac
 }

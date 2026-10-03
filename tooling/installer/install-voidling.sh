@@ -56,7 +56,8 @@ Mandatory arguments to long options are mandatory for short options too.
 
   -t, --target=MODE     install target: dir or disk (default: dir)
   -d, --dest=PATH       destination directory or block device
-  -V, --variant=NAME    image variant: minimal or plasma (default: minimal)
+  -V, --variant=NAME    image variant: minimal, plasma, or plasma-fenestration
+                        (default: minimal)
   -f, --filesystem=FS   root filesystem: zfs or btrfs (default: zfs)
       --ostree-repo=DIR source OSTree repository
       --ostree-ref=REF  OSTree ref to deploy
@@ -65,7 +66,11 @@ Mandatory arguments to long options are mandatory for short options too.
       --i-understand-this-wipes-disks
                         required for TARGET=disk; enables GPT/mkfs/apply
       --swap            record optional swap in the install plan (default: off)
-      --luks            record optional LUKS in the install plan (default: off)
+      --luks            record optional LUKS (default: off). Disk apply also
+                        formats the root partition when
+                        --luks-passphrase-file is set
+      --luks-passphrase-file=FILE
+                        passphrase file for disk-apply LUKS (not echoed)
   -h, --help            display this help and exit
 
 Environment (flags override these):
@@ -85,7 +90,8 @@ Environment (flags override these):
   SKIP_MKFS       1 to skip real mkfs (default in dir mode; forced off
                   for TARGET=disk with --i-understand-this-wipes-disks)
   SWAP            1 to record optional swap (plan only; default off)
-  LUKS            1 to record optional LUKS (plan only; default off)
+  LUKS            1 to request LUKS (default off)
+  LUKS_PASS_FILE  passphrase file used when disk apply opens LUKS
   VOIDLING_HOSTNAME  passed through to first-boot (not HOSTNAME)
   VOIDLING_USER      passed through to first-boot
 EOF
@@ -126,6 +132,10 @@ cleanup() {
     fi
     if [[ -n "${ZPOOL_CREATED:-}" ]]; then
         zpool export -- "$ZPOOL_CREATED" 2>/dev/null || true
+    fi
+    if [[ -n "${LUKS_OPENED:-}" ]]; then
+        cryptsetup close -- "${LUKS_NAME:-voidling-root}" 2>/dev/null || true
+        LUKS_OPENED=""
     fi
     if [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]]; then
         rm -rf -- "$TMP_DIR"
@@ -245,6 +255,18 @@ parse_args() {
                 LUKS=1
                 shift
                 ;;
+            --luks-passphrase-file)
+                require_arg "$1" "${2:-}"
+                LUKS_PASS_FILE="$2"
+                LUKS=1
+                shift 2
+                ;;
+            --luks-passphrase-file=*)
+                LUKS_PASS_FILE="${1#*=}"
+                [[ -n "$LUKS_PASS_FILE" ]] || usage_error "option requires an argument -- 'luks-passphrase-file'"
+                LUKS=1
+                shift
+                ;;
             --)
                 shift
                 break
@@ -337,6 +359,10 @@ apply_defaults() {
     SKIP_MKFS="${SKIP_MKFS:-1}"
     SWAP="${SWAP:-0}"
     LUKS="${LUKS:-0}"
+    LUKS_PASS_FILE="${LUKS_PASS_FILE:-}"
+    LUKS_NAME="voidling-root"
+    LUKS_OPENED=""
+    LUKS_UUID=""
     STAGING_DIR="${STAGING_DIR:-$OUT_DIR/install-staging}"
     OSTREE_REPO_DIR="${OSTREE_REPO_DIR:-$OUT_DIR/ostree-repo}"
     OSTREE_REF="${OSTREE_REF:-voidling/$TARGET_ARCH/$TARGET_LIBC/$VARIANT}"
@@ -347,6 +373,15 @@ apply_defaults() {
     BTRFS_TOP=""
     ZPOOL_CREATED=""
     ROOT_KARG="${ROOT_KARG:-}"
+    # Disk installs default to lab voidling/voidling; first login replaces the account
+    # unless VOIDLING_KEEP_LAB_CREDENTIALS=1 (CI/qcow2 smoke images).
+    if [[ -z "${VOIDLING_PASSWORD_HASH:-}" ]]; then
+        VOIDLING_PASSWORD_HASH="$(
+            cat <<'EOF'
+$6$voidlingtest$Hf9kEDiO7JpZiyt/BgjOXCxHgZSMfSZziuGe3dLNxvjAWTU9Ax.4K8ZWG2kf5uGAPnn7QAylDnQeuwQ6cgIIQ1
+EOF
+        )"
+    fi
 }
 
 validate_config() {
@@ -357,9 +392,9 @@ validate_config() {
             ;;
     esac
     case "$VARIANT" in
-        minimal | plasma) ;;
+        minimal | plasma | plasma-fenestration) ;;
         *)
-            die "VARIANT must be minimal or plasma (got: $VARIANT)"
+            die "VARIANT must be minimal, plasma, or plasma-fenestration (got: $VARIANT)"
             ;;
     esac
     case "$FILESYSTEM" in
@@ -561,9 +596,17 @@ assert_safe_target() {
     if [[ "$dest_resolved" == "$ROOT_DIR" ]]; then
         die "refusing to use the repository root as DEST: $dest_resolved"
     fi
-    if is_forbidden_system_path "$dest_resolved"; then
-        die "refusing dangerous DEST: $dest_resolved"
-    fi
+    # Staging lives under OUT_DIR (live ISO uses /var/tmp/voidling). That path
+    # matches /var/* but is not a product install dest — only refuse other
+    # system paths.
+    case "$dest_resolved" in
+        "$OUT_DIR" | "$OUT_DIR"/*) ;;
+        *)
+            if is_forbidden_system_path "$dest_resolved"; then
+                die "refusing dangerous DEST: $dest_resolved"
+            fi
+            ;;
+    esac
 
     if is_block_device "$WORK_DEST"; then
         die "internal error: work dest resolved to a block device: $WORK_DEST"
@@ -616,6 +659,18 @@ write_text_file() {
     fi
 }
 
+acquire_staging_lock() {
+    local lock
+    lock="${OUT_DIR}/install-staging.lock"
+    mkdir -p -- "$OUT_DIR"
+    # FD 9 held for the life of this process; flock releases on exit.
+    exec 9>"$lock"
+    if ! flock -n 9; then
+        die "another install-voidling holds $lock (refuse concurrent staging wipe)"
+    fi
+    log "    staging lock: $lock"
+}
+
 prepare_staging() {
     if [[ "$DRY_RUN" == "1" ]]; then
         log "dry-run: would prepare staging at $WORK_DEST"
@@ -623,6 +678,7 @@ prepare_staging() {
     fi
 
     mkdir -p -- "$OUT_DIR"
+    acquire_staging_lock
     if [[ -d "$WORK_DEST" && -e "$WORK_DEST/$STAGING_MARKER" ]]; then
         log "==> replacing previous staging tree"
         rm -rf -- "$WORK_DEST"
@@ -639,6 +695,7 @@ prepare_staging() {
 
 prepare_disk_staging() {
     mkdir -p -- "$OUT_DIR"
+    acquire_staging_lock
     if [[ -d "$WORK_DEST" && -e "$WORK_DEST/$STAGING_MARKER" ]]; then
         log "==> replacing previous staging tree"
         rm -rf -- "$WORK_DEST"
@@ -826,12 +883,40 @@ export_helper_env() {
     export APPLY_DISK
     export SWAP
     export LUKS
+    if [[ -n "${LUKS_UUID:-}" ]]; then
+        export LUKS_UUID
+    fi
+    if [[ -n "${LUKS_PASS_FILE:-}" ]]; then
+        export LUKS_PASS_FILE
+    fi
+    if [[ -n "${EXTRA_KARGS:-}" ]]; then
+        export EXTRA_KARGS
+    fi
     export INSTALL_MODE="$TARGET"
     export BOOT_ALLOW_EXTRA_ENTRIES=1
+    export VOIDLING_BOOT_PREFIX="${VOIDLING_BOOT_PREFIX:-/boot}"
     export BOOTLOADER="${BOOTLOADER:-grub}"
     export BOOTLOADER_ID="${BOOTLOADER_ID:-Voidling}"
     if [[ -n "${ROOT_KARG:-}" ]]; then
         export ROOT_KARG
+    fi
+    if [[ -n "${ROOT_FS_UUID:-}" ]]; then
+        export ROOT_FS_UUID
+    fi
+    if [[ -n "${VOIDLING_PASSWORD_HASH:-}" ]]; then
+        export VOIDLING_PASSWORD_HASH
+    fi
+    if [[ -n "${VOIDLING_KEEP_LAB_CREDENTIALS:-}" ]]; then
+        export VOIDLING_KEEP_LAB_CREDENTIALS
+    fi
+    if [[ -n "${VOIDLING_SET_ROOT_PASSWORD:-}" ]]; then
+        export VOIDLING_SET_ROOT_PASSWORD
+    fi
+    if [[ -n "${VOIDLING_HOSTNAME:-}" ]]; then
+        export VOIDLING_HOSTNAME
+    fi
+    if [[ -n "${VOIDLING_USER:-}" ]]; then
+        export VOIDLING_USER
     fi
 }
 
@@ -905,6 +990,9 @@ require_apply_prereqs() {
         require_cmd zpool
         require_cmd zfs
     fi
+    if [[ "$LUKS" == "1" ]]; then
+        require_cmd cryptsetup
+    fi
     [[ -x "$layout" ]] || die "layout helper missing or not executable: $layout"
     [[ -x "$ROOT_DIR/$HELPER_OSTREE" ]] || die "helper missing or not executable: $ROOT_DIR/$HELPER_OSTREE"
     [[ -x "$ROOT_DIR/$HELPER_BOOT" ]] || die "helper missing or not executable: $ROOT_DIR/$HELPER_BOOT"
@@ -930,6 +1018,10 @@ print_disk_plan() {
     log "    wipefs -a -- $disk"
     log "    sfdisk -- $disk  # GPT: ESP ${ESP_SIZE_MIB}MiB FAT + remainder $FILESYSTEM"
     log "    mkfs.vfat -F 32 -n $(esp_fat_label) -- <esp-part>"
+    if [[ "$LUKS" == "1" ]]; then
+        log "    cryptsetup luksFormat --type luks2 -- <root-part>"
+        log "    cryptsetup open -- <root-part> $LUKS_NAME"
+    fi
     if [[ "$FILESYSTEM" == "btrfs" ]]; then
         log "    bash -- $ROOT_DIR/$HELPER_BTRFS --apply -L $ROOT_LABEL -- <root-part> $BTRFS_TOP"
         log "    mount -o subvol=@ -- <root-part> $SYSROOT"
@@ -970,39 +1062,56 @@ partition_exists() {
     [[ -b "$path" ]]
 }
 
+partition_belongs_to_disk() {
+    local part="$1"
+    local disk="$2"
+    local resolved_part resolved_disk
+
+    resolved_part="$(readlink -f -- "$part")"
+    resolved_disk="$(readlink -f -- "$disk")"
+    case "$resolved_part" in
+        "${resolved_disk}"p[0-9]* | "${resolved_disk}"[0-9]*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 resolve_partition() {
     local orig disk num candidate
     orig="$1"
     disk="$2"
     num="$3"
 
+    for candidate in \
+        "${disk}p${num}" \
+        "${disk}${num}" \
+        "${orig}p${num}" \
+        "${orig}${num}" \
+        "${orig}-part${num}" \
+        "${disk}-part${num}"; do
+        if partition_exists "$candidate"; then
+            readlink -f -- "$candidate"
+            return 0
+        fi
+    done
+
     if [[ "$num" -eq 1 ]]; then
         candidate="/dev/disk/by-partlabel/${ESP_LABEL}"
-        if partition_exists "$candidate"; then
+        if partition_exists "$candidate" &&
+            partition_belongs_to_disk "$candidate" "$disk"; then
             readlink -f -- "$candidate"
             return 0
         fi
     fi
     if [[ "$num" -eq 2 ]]; then
         candidate="/dev/disk/by-partlabel/${ROOT_LABEL}"
-        if partition_exists "$candidate"; then
+        if partition_exists "$candidate" &&
+            partition_belongs_to_disk "$candidate" "$disk"; then
             readlink -f -- "$candidate"
             return 0
         fi
     fi
-
-    for candidate in \
-        "${orig}-part${num}" \
-        "${orig}p${num}" \
-        "${orig}${num}" \
-        "${disk}-part${num}" \
-        "${disk}p${num}" \
-        "${disk}${num}"; do
-        if partition_exists "$candidate"; then
-            readlink -f -- "$candidate"
-            return 0
-        fi
-    done
 
     case "$disk" in
         *[0-9])
@@ -1067,7 +1176,11 @@ run_layout_apply() {
 
 mount_btrfs_sysroot() {
     if findmnt -n -- "$BTRFS_TOP" >/dev/null 2>&1; then
-        umount -- "$BTRFS_TOP"
+        sync || true
+        if ! umount -- "$BTRFS_TOP" 2>/dev/null; then
+            sleep 1
+            umount -- "$BTRFS_TOP" 2>/dev/null || umount -l -- "$BTRFS_TOP"
+        fi
     fi
     mkdir -p -- "$SYSROOT"
     mount -o "subvol=@,compress=zstd:1,noatime" -- "$ROOT_PART" "$SYSROOT"
@@ -1106,9 +1219,20 @@ set_root_karg() {
         ROOT_KARG="ZFS=${ZPOOL_NAME}/ROOT"
         return 0
     fi
-    uuid="$(blkid -s UUID -o value -- "$ROOT_PART" 2>/dev/null || true)"
+    if [[ "$FILESYSTEM" == "btrfs" ]]; then
+        case " ${EXTRA_KARGS:-} " in
+            *" rootflags="*) ;;
+            *)
+                EXTRA_KARGS="${EXTRA_KARGS:-rw zswap.enabled=0 modprobe.blacklist=zswap} rootflags=subvol=@"
+                export EXTRA_KARGS
+                ;;
+        esac
+    fi
+    uuid="$(blkid -p -c /dev/null -s UUID -o value -- "$ROOT_PART" 2>/dev/null || true)"
     if [[ -n "$uuid" ]]; then
         ROOT_KARG="UUID=${uuid}"
+        ROOT_FS_UUID="$uuid"
+        export ROOT_FS_UUID
     else
         ROOT_KARG="$ROOT_PART"
     fi
@@ -1121,6 +1245,7 @@ apply_disk_install() {
     assert_disk_safe_to_wipe
     require_apply_prereqs
 
+    require_luks_passphrase
     log "==> wiping and installing to $DISK_DEST"
     log "    this destroys all data on that disk"
 
@@ -1137,6 +1262,7 @@ apply_disk_install() {
     log "==> mkfs.vfat ESP $ESP_PART"
     mkfs.vfat -F 32 -n "$(esp_fat_label)" -- "$ESP_PART"
 
+    open_luks_root
     run_layout_apply
     if [[ "$FILESYSTEM" == "btrfs" ]]; then
         mount_btrfs_sysroot
@@ -1149,8 +1275,147 @@ apply_disk_install() {
 
     export_helper_env
     run_or_stub_helper ostree "$HELPER_OSTREE"
+    write_crypttab
+    write_home_fstab
+    write_persistent_kargs
     run_or_stub_helper boot "$HELPER_BOOT"
     run_or_stub_helper firstboot "$HELPER_FIRSTBOOT"
+}
+
+require_luks_passphrase() {
+    if [[ "$LUKS" != "1" ]]; then
+        return 0
+    fi
+    if [[ -z "$LUKS_PASS_FILE" || ! -f "$LUKS_PASS_FILE" ]]; then
+        die "disk apply with --luks requires --luks-passphrase-file (a file, not a flag value on the command line)"
+    fi
+    if [[ ! -s "$LUKS_PASS_FILE" ]]; then
+        die "LUKS passphrase file is empty: $LUKS_PASS_FILE"
+    fi
+}
+
+open_luks_root() {
+    local mapper pass_norm
+    if [[ "$LUKS" != "1" ]]; then
+        return 0
+    fi
+    require_luks_passphrase
+    # --key-file uses the entire file; strip trailing newlines so the key
+    # matches interactive GRUB/cryptsetup passphrase entry (Enter is not part
+    # of the passphrase).
+    pass_norm="$(mktemp -- "${TMPDIR:-/tmp}/voidling-luks-pass-norm.XXXXXX")"
+    # Command substitution strips trailing newlines from the file contents.
+    printf '%s' "$(cat -- "$LUKS_PASS_FILE")" >"$pass_norm"
+    chmod 600 -- "$pass_norm"
+    # Slot 0: PBKDF2 for GRUB cryptomount (Argon2 unsupported in Void GRUB).
+    # Slot 1: argon2id for cryptsetup/initramfs (same passphrase).
+    log "==> LUKS2 format $ROOT_PART (pbkdf2 slot for GRUB)"
+    if ! cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 \
+        --pbkdf-force-iterations 500000 \
+        --key-file "$pass_norm" -- "$ROOT_PART"; then
+        rm -f -- "$pass_norm"
+        die "cryptsetup luksFormat failed on $ROOT_PART"
+    fi
+    log "==> LUKS2 add argon2id keyslot (same passphrase)"
+    if ! cryptsetup luksAddKey --batch-mode --pbkdf argon2id \
+        --key-file "$pass_norm" -- "$ROOT_PART" "$pass_norm"; then
+        log "warning: argon2id luksAddKey failed; continuing with PBKDF2-only"
+    fi
+    LUKS_UUID="$(cryptsetup luksUUID -- "$ROOT_PART")" || true
+    if [[ -z "$LUKS_UUID" ]]; then
+        rm -f -- "$pass_norm"
+        die "cryptsetup did not report a LUKS UUID"
+    fi
+    log "==> opening LUKS as $LUKS_NAME"
+    if ! cryptsetup open --key-file "$pass_norm" -- "$ROOT_PART" "$LUKS_NAME"; then
+        rm -f -- "$pass_norm"
+        die "cryptsetup open failed on $ROOT_PART"
+    fi
+    rm -f -- "$pass_norm"
+    LUKS_OPENED=1
+    mapper="/dev/mapper/$LUKS_NAME"
+    [[ -b "$mapper" ]] || die "LUKS mapper is missing: $mapper"
+    ROOT_PART="$mapper"
+    # Append — do not replace EXTRA_KARGS (build-ostree-qcow2 sets console=ttyS0).
+    case " ${EXTRA_KARGS:-} " in
+        *" rd.luks.uuid="*) ;;
+        *)
+            if [[ -n "${EXTRA_KARGS:-}" ]]; then
+                EXTRA_KARGS="${EXTRA_KARGS} rd.luks.uuid=${LUKS_UUID}"
+            else
+                EXTRA_KARGS="rd.luks.uuid=${LUKS_UUID}"
+            fi
+            ;;
+    esac
+    export EXTRA_KARGS
+}
+
+deployment_etc_dir() {
+    local d
+    shopt -s nullglob
+    for d in "$SYSROOT"/ostree/deploy/*/deploy/*.0/etc; do
+        if [[ -d "$d" ]]; then
+            printf '%s\n' "$d"
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
+write_crypttab() {
+    local line dest
+    if [[ "$LUKS" != "1" || -z "$LUKS_UUID" ]]; then
+        return 0
+    fi
+    line="$(printf '%s UUID=%s none luks' "$LUKS_NAME" "$LUKS_UUID")"
+    mkdir -p -- "$SYSROOT/etc"
+    printf '%s\n' "$line" >"$SYSROOT/etc/crypttab"
+    log "    crypttab: $SYSROOT/etc/crypttab"
+    if dest="$(deployment_etc_dir)"; then
+        printf '%s\n' "$line" >"$dest/crypttab"
+        log "    crypttab: $dest/crypttab"
+    fi
+}
+
+write_home_fstab() {
+    local dest uuid line
+    if [[ "$FILESYSTEM" != "btrfs" || -z "${ROOT_FS_UUID:-}" ]]; then
+        return 0
+    fi
+    uuid="$ROOT_FS_UUID"
+    line="UUID=${uuid} /home btrfs subvol=@home,compress=zstd:1,noatime 0 0"
+    # OSTree prepare-root owns /; only ensure /home is mounted from @home.
+    # Note: mutable /var stays on the OSTree stateroot path (not @var bind).
+    if dest="$(deployment_etc_dir)"; then
+        if [[ -f "$dest/fstab" ]] && grep -qE '[[:space:]]/home[[:space:]]' -- "$dest/fstab"; then
+            log "    fstab: /home already present in $dest/fstab"
+        else
+            printf '%s\n' "$line" >>"$dest/fstab"
+            log "    fstab: mounted @home at /home ($dest/fstab)"
+        fi
+    fi
+    mkdir -p -- "$SYSROOT/etc"
+    if [[ -f "$SYSROOT/etc/fstab" ]] && grep -qE '[[:space:]]/home[[:space:]]' -- "$SYSROOT/etc/fstab"; then
+        :
+    else
+        printf '%s\n' "$line" >>"$SYSROOT/etc/fstab"
+    fi
+}
+
+write_persistent_kargs() {
+    local dest body
+    body="${EXTRA_KARGS:-}"
+    [[ -n "$body" ]] || return 0
+    mkdir -p -- "$SYSROOT/etc/voidling"
+    printf '%s\n' "$body" >"$SYSROOT/etc/voidling/kargs"
+    log "    kargs: $SYSROOT/etc/voidling/kargs"
+    if dest="$(deployment_etc_dir)"; then
+        mkdir -p -- "$dest/voidling"
+        printf '%s\n' "$body" >"$dest/voidling/kargs"
+        log "    kargs: $dest/voidling/kargs"
+    fi
 }
 
 write_summary() {
@@ -1162,7 +1427,13 @@ write_summary() {
     log "    sysroot:    $SYSROOT"
     log "    ostree ref: $OSTREE_REF"
     log "    swap plan:  $SWAP (record only)"
-    log "    luks plan:  $LUKS (record only)"
+    if [[ "$LUKS" == "1" && "$APPLY_DISK" == "1" ]]; then
+        log "    luks:       $LUKS_NAME opened (uuid ${LUKS_UUID:-unknown})"
+    elif [[ "$LUKS" == "1" ]]; then
+        log "    luks plan:  1 (record only; disk apply needs --luks-passphrase-file)"
+    else
+        log "    luks:       off"
+    fi
     if [[ "$TARGET" == "disk" ]]; then
         if [[ "$APPLY_DISK" == "1" ]]; then
             log "    disk:       $DISK_DEST (partitioned and formatted)"

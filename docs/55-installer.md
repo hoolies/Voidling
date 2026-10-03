@@ -47,7 +47,10 @@ the disk that backs the host `/` or `/boot`. Missing `OSTREE_REPO_DIR` also
 refuses to wipe.
 
 First-boot identity (hostname, user, locale, NetworkManager) is a separate
-helper (`configure-system.sh`) when present. `--swap` / `--luks` are plan-only.
+helper (`configure-system.sh`) when present. `--swap` is plan-only.
+`--luks` is plan-only in directory mode. Disk apply with
+`--luks-passphrase-file` formats the root partition as LUKS2.
+zram swap is a boot service (`voidling-zram`), independent of `--swap`.
 ARM is still out of scope.
 
 ## What you run today

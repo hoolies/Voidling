@@ -13,15 +13,21 @@ log() {
     printf '%s\n' "$*" >&2
 }
 
-# /usr is the OSTree payload. Read-only here is what makes xbps-install fail.
-if [ -d /usr ]; then
-    if ! mount -o remount,ro -- /usr; then
-        log "$PROGNAME: warning: could not remount /usr read-only"
+log_mount_table() {
+    if [ ! -r /proc/mounts ]; then
+        log "$PROGNAME: /proc/mounts is not readable"
+        return 0
     fi
-fi
+    log "$PROGNAME: mount table:"
+    while IFS= read -r _line || [ -n "${_line:-}" ]; do
+        [ -n "${_line:-}" ] || continue
+        log "$_line"
+    done </proc/mounts
+    return 0
+}
 
-# xbps metadata/cache live under /var. If those stay writable, xbps can
-# still rewrite the package db after /usr is already read-only.
+# Bind then remount so a directory inside an overlay (live ISO) becomes
+# read-only. A plain remount only works when the path is already its own mount.
 bind_ro() {
     _dir=$1
     if [ ! -d "$_dir" ]; then
@@ -32,12 +38,16 @@ bind_ro() {
     fi
     if ! mount --bind -- "$_dir" "$_dir"; then
         log "$PROGNAME: warning: bind $_dir failed"
+        log_mount_table
         return 0
     fi
     if ! mount -o remount,bind,ro -- "$_dir"; then
         log "$PROGNAME: warning: could not remount ro $_dir"
+        log_mount_table
     fi
+    return 0
 }
 
+bind_ro /usr
 bind_ro /var/db/xbps
 bind_ro /var/cache/xbps

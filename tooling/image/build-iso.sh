@@ -2,8 +2,9 @@
 # Build a UEFI-bootable hybrid ISO from a Voidling bootable rootfs.
 #
 # GRUB + kernel + initramfs, live kargs, and (by default) a squashfs payload
-# at live/filesystem.squashfs. A writable live session also needs the rootfs
-# initrd rebuilt with dmsquash-live (see install-live-dracut.sh).
+# at live/filesystem.squashfs. The live initrd is
+# out/initramfs-ARCH-LIBC-VARIANT-live.img from install-live-dracut.sh.
+# That file is not the OSTree initrd inside the rootfs.
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
@@ -43,6 +44,8 @@ Mandatory arguments to long options are mandatory for short options too.
   -V, --variant=NAME    product variant: minimal or plasma (default: minimal)
   -r, --rootfs DIR      rootfs directory (default:
                         OUT_DIR/rootfs-ARCH-LIBC-VARIANT)
+      --initrd FILE     live initrd to pack as /boot/initrd (default:
+                        OUT_DIR/initramfs-ARCH-LIBC-VARIANT-live.img)
   -o, --output FILE     ISO output path (default:
                         OUT_DIR/voidling-ARCH-uefi-VARIANT.iso)
   -l, --label LABEL     ISO volume label (default: VOIDLING)
@@ -64,10 +67,11 @@ Optional:
   mmd, mcopy            populate the EFI FAT image without root
 
 Root is recommended when packing squashfs (device nodes, root-only files).
-A complete live boot needs a BOOTABLE rootfs whose initrd was rebuilt with
-dmsquash-live (tooling/image/install-live-dracut.sh; omits voidling-ostree).
-This script packs the ISO (live kargs + optional squashfs). A sealed compose
-tree (/usr/etc, no /etc) gets a temporary /etc restored into the squashfs.
+A complete live boot needs the side initrd from install-live-dracut.sh
+(dmsquash-live, omits voidling-ostree). This script does not pack
+/boot/initramfs-*.img from the rootfs; that image is the OSTree initrd.
+A sealed compose tree (/usr/etc, no /etc) gets a temporary /etc restored
+into the squashfs.
 The live squashfs also gets the installer plus its helpers (not left in the
 compose tree): voidling-installer and install-voidling.
 
@@ -79,6 +83,7 @@ Environment:
   TARGET_ARCH    architecture (default: x86_64)
   TARGET_LIBC    libc (default: glibc)
   VARIANT        product variant: minimal or plasma (default: minimal)
+  LIVE_INITRD    same as --initrd
   SQUASHFS_FILE  existing squashfs to copy instead of packing the rootfs
 EOF
 }
@@ -124,7 +129,18 @@ parse_args() {
             -r | --rootfs)
                 require_arg "$@"
                 ROOTFS_DIR="$2"
+                ROOTFS_FROM_FLAG=1
                 shift 2
+                ;;
+            --initrd)
+                require_arg "$@"
+                LIVE_INITRD="$2"
+                shift 2
+                ;;
+            --initrd=*)
+                LIVE_INITRD="${1#--initrd=}"
+                [[ -n "$LIVE_INITRD" ]] || usage_error "option requires an argument -- 'initrd'"
+                shift
                 ;;
             -o | --output)
                 require_arg "$@"
@@ -200,12 +216,20 @@ resolve_defaults() {
     TARGET_LIBC="${TARGET_LIBC:-glibc}"
     VARIANT="${VARIANT:-$DEFAULT_VARIANT}"
     case "$VARIANT" in
-        minimal | plasma) ;;
+        minimal | plasma | plasma-fenestration) ;;
         *)
-            die "VARIANT must be minimal or plasma (got: $VARIANT)"
+            die "VARIANT must be minimal, plasma, or plasma-fenestration (got: $VARIANT)"
             ;;
     esac
-    ROOTFS_DIR="${ROOTFS_DIR:-$OUT_DIR/rootfs-$TARGET_ARCH-$TARGET_LIBC-$VARIANT}"
+    PACK_OSTREE_REPO=1
+    LIVE_INITRD_VARIANT="$VARIANT"
+    if [[ "$VARIANT" != "minimal" && "${ROOTFS_FROM_FLAG:-0}" != "1" ]]; then
+        ROOTFS_DIR="$OUT_DIR/rootfs-$TARGET_ARCH-$TARGET_LIBC-minimal"
+        LIVE_INITRD_VARIANT="minimal"
+    else
+        ROOTFS_DIR="${ROOTFS_DIR:-$OUT_DIR/rootfs-$TARGET_ARCH-$TARGET_LIBC-$VARIANT}"
+    fi
+    OSTREE_REPO_DIR="${OSTREE_REPO_DIR:-$OUT_DIR/ostree-repo}"
     ISO_PATH="${ISO_PATH:-$OUT_DIR/voidling-$TARGET_ARCH-uefi-$VARIANT.iso}"
     ISO_LABEL="${ISO_LABEL:-$DEFAULT_ISO_LABEL}"
     SQUASHFS_FILE="${SQUASHFS_FILE:-}"
@@ -362,6 +386,26 @@ validate_inputs() {
     fi
     ROOTFS_DIR="$(cd -- "$ROOTFS_DIR" && pwd)"
     ISO_PATH="$(absolutize_new_file "$ISO_PATH")"
+    select_live_initrd
+}
+
+select_live_initrd() {
+    local side dir base
+    if [[ -n "${LIVE_INITRD:-}" ]]; then
+        side="$LIVE_INITRD"
+    else
+        side="$OUT_DIR/initramfs-$TARGET_ARCH-$TARGET_LIBC-${LIVE_INITRD_VARIANT:-$VARIANT}-live.img"
+    fi
+    if [[ ! -f "$side" ]]; then
+        if [[ -n "${LIVE_INITRD:-}" ]]; then
+            die "live initrd does not exist: $side"
+        fi
+        INITRD_SRC=""
+        return 0
+    fi
+    dir="$(cd -- "$(dirname -- "$side")" && pwd)"
+    base="$(basename -- "$side")"
+    INITRD_SRC="$dir/$base"
 }
 
 rootfs_has_live_conf() {
@@ -395,18 +439,41 @@ initrd_has_dmsquash() {
     return "$rc"
 }
 
+ostree_initrd_in_rootfs() {
+    local boot_dir kver mod_dir
+    boot_dir="$ROOTFS_DIR/boot"
+    [[ -d "$boot_dir" ]] || return 1
+    for kver in "$boot_dir"/vmlinuz-*; do
+        [[ -e "$kver" ]] || continue
+        kver="${kver##*/vmlinuz-}"
+        mod_dir="$ROOTFS_DIR/usr/lib/modules/$kver"
+        if [[ -f "$mod_dir/initramfs-$kver.img" ]]; then
+            printf '%s\n' "$mod_dir/initramfs-$kver.img"
+            return 0
+        fi
+    done
+    return 1
+}
+
 warn_live_readiness() {
+    local side ostree_initrd
+    side="${LIVE_INITRD:-$OUT_DIR/initramfs-$TARGET_ARCH-$TARGET_LIBC-${LIVE_INITRD_VARIANT:-$VARIANT}-live.img}"
     if [[ -z "$INITRD_SRC" ]]; then
-        log "warning: no initramfs in $ROOTFS_DIR/boot or $ROOTFS_DIR/usr/lib/modules; live boot will fail"
-        return 0
+        die "live initrd missing ($side); run tooling/image/install-live-dracut.sh first"
     fi
-    if ! rootfs_has_live_conf; then
-        log "warning: no dmsquash-live dracut snippet in the rootfs; run tooling/image/install-live-dracut.sh before building the ISO"
+    if rootfs_has_live_conf; then
+        die "dmsquash-live config is inside $ROOTFS_DIR; remove it before commit so the installed initrd stays OSTree"
     fi
     if command -v lsinitrd >/dev/null 2>&1; then
         if ! initrd_has_dmsquash "$INITRD_SRC"; then
-            log "warning: $INITRD_SRC does not appear to contain dmsquash-live; run tooling/image/install-live-dracut.sh"
+            die "$INITRD_SRC does not contain dmsquash-live; rerun tooling/image/install-live-dracut.sh"
         fi
+    else
+        die "lsinitrd is required to verify the live initrd (install dracut host tools)"
+    fi
+    ostree_initrd="$(ostree_initrd_in_rootfs || true)"
+    if [[ -n "$ostree_initrd" && "$INITRD_SRC" -ef "$ostree_initrd" ]]; then
+        die "live initrd must not be the OSTree initramfs from the rootfs ($ostree_initrd); use the side file from install-live-dracut.sh"
     fi
 }
 
@@ -451,6 +518,16 @@ write_live_wrapper() {
         printf '%s\n' "    . $LIVE_INSTALL_ROOT/live.env"
         printf '%s\n' "    set +a"
         printf '%s\n' "fi"
+        printf '%s\n' "if [[ -z \${OSTREE_REPO_DIR:-} ]]; then"
+        printf '%s\n' "    for _repo in /run/initramfs/live/ostree-repo /mnt/cdrom/ostree-repo; do"
+        printf '%s\n' "        if [[ -d \$_repo ]]; then"
+        printf '%s\n' "            OSTREE_REPO_DIR=\$_repo"
+        printf '%s\n' "            export OSTREE_REPO_DIR"
+        printf '%s\n' "            break"
+        printf '%s\n' "        fi"
+        printf '%s\n' "    done"
+        printf '%s\n' "    unset _repo"
+        printf '%s\n' "fi"
         printf '%s\n' "exec $LIVE_INSTALL_ROOT/tooling/installer/$target \"\$@\""
     } >"$dest"
     chmod 0755 -- "$dest"
@@ -486,11 +563,23 @@ install_live_installer() {
     done
     {
         printf 'VARIANT=%s\n' "$VARIANT"
-        printf '%s\n' "FILESYSTEM=zfs"
+        printf '%s\n' "FILESYSTEM=btrfs"
         printf 'OUT_DIR=%s\n' "$LIVE_OUT_DIR"
     } >"$dest/live.env"
     write_live_wrapper "$ROOTFS_DIR/usr/bin/voidling-installer" "voidling-installer"
     write_live_wrapper "$ROOTFS_DIR/usr/bin/install-voidling" "install-voidling.sh"
+    # Credential helper lives under firstboot/, not installer/.
+    {
+        printf '%s\n' "#!/usr/bin/env sh"
+        printf '%s\n' "exec $LIVE_INSTALL_ROOT/tooling/firstboot/voidling-set-credentials.sh \"\$@\""
+    } >"$ROOTFS_DIR/usr/bin/voidling-set-credentials"
+    chmod 0755 -- "$ROOTFS_DIR/usr/bin/voidling-set-credentials"
+    if [[ -f "$ROOT_DIR/overlays/immutable/etc/sudoers.d/voidling-credentials" ]]; then
+        mkdir -p -- "$ROOTFS_DIR/etc/sudoers.d"
+        cp -- "$ROOT_DIR/overlays/immutable/etc/sudoers.d/voidling-credentials" \
+            "$ROOTFS_DIR/etc/sudoers.d/voidling-credentials"
+        chmod 0440 -- "$ROOTFS_DIR/etc/sudoers.d/voidling-credentials"
+    fi
     {
         printf '%s\n' "[Desktop Entry]"
         printf '%s\n' "Type=Application"
@@ -539,7 +628,7 @@ cleanup() {
 
 live_linux_kargs() {
     local extra="${1:-}"
-    printf 'rd.live.image rd.overlay rd.live.dir=%s rd.live.squashimg=%s root=live:CDLABEL=%s console=tty0 console=ttyS0' \
+    printf 'rd.live.image rd.overlay rd.live.dir=%s rd.live.squashimg=%s root=live:CDLABEL=%s console=tty0 console=ttyS0 zswap.enabled=0' \
         "$LIVE_DIR" "$LIVE_SQUASH" "$ISO_LABEL"
     if [[ -n "$extra" ]]; then
         printf ' %s' "$extra"
@@ -585,7 +674,7 @@ write_grub_cfg() {
         write_grub_entry "Voidling live (debug)" "rd.live.debug=1 rd.shell"
         printf '%s\n' ""
         printf '%s\n' 'menuentry "Voidling rescue shell" {'
-        printf '%s\n' "    linux /boot/vmlinuz rd.break=pre-mount console=tty0 console=ttyS0 rw"
+        printf '%s\n' "    linux /boot/vmlinuz rd.break=pre-mount console=tty0 console=ttyS0 zswap.enabled=0 rw"
         if [[ -n "$INITRD_SRC" ]]; then
             printf '%s\n' "    initrd /boot/initrd"
         fi
@@ -609,9 +698,9 @@ write_iso_readme() {
         printf '  rd.live.dir=%s rd.live.squashimg=%s root=live:CDLABEL=%s\n' \
             "$LIVE_DIR" "$LIVE_SQUASH" "$ISO_LABEL"
         printf '%s\n' ""
-        printf '%s\n' "A writable live session needs the initrd rebuilt with"
-        printf '%s\n' "dmsquash-live (tooling/image/install-live-dracut.sh) on a"
-        printf '%s\n' "BOOTABLE rootfs; that initrd omits voidling-ostree."
+        printf '%s\n' "A writable live session packs the side initrd from"
+        printf '%s\n' "install-live-dracut.sh (dmsquash-live, omits voidling-ostree)."
+        printf '%s\n' "That file is not /boot/initramfs-*.img in the compose tree."
         printf '%s\n' "Sealed compose trees restore /etc from /usr/etc inside"
         printf '%s\n' "the squashfs only (the compose tree stays /usr/etc)."
         printf '%s\n' "Live session installer: sudo voidling-installer"
@@ -623,6 +712,21 @@ write_iso_readme() {
         printf 'Volume label: %s\n' "$ISO_LABEL"
         printf 'Source rootfs: %s\n' "$ROOTFS_DIR"
     } >"$dest"
+}
+
+copy_ostree_repo_payload() {
+    local iso_root="$1"
+    local repo
+    if [[ "${PACK_OSTREE_REPO:-0}" != "1" ]]; then
+        return 0
+    fi
+    repo="${OSTREE_REPO_DIR:-$OUT_DIR/ostree-repo}"
+    if [[ ! -d "$repo" ]]; then
+        die "product ISO needs an OSTree repo at $repo (compose and commit the $VARIANT ref first)"
+    fi
+    log "==> copying OSTree repo onto the ISO ($VARIANT is deployed from this repo, not booted as the live root)"
+    rm -rf -- "$iso_root/ostree-repo"
+    cp -a -- "$repo" "$iso_root/ostree-repo"
 }
 
 copy_boot_files() {
@@ -650,7 +754,7 @@ restore_etc_for_squashfs() {
 }
 
 enable_live_serial_getty() {
-    local src dest link
+    local src dest link hash days
     if [[ ! -d "$ROOTFS_DIR/etc" ]]; then
         return 0
     fi
@@ -670,6 +774,55 @@ enable_live_serial_getty() {
     fi
     ln -sfn -- /etc/sv/agetty-ttyS0 "$link"
     log "    enabled agetty-ttyS0 in live squashfs /etc"
+    # Live session: voidling / voidling (not empty root). Change via
+    # voidling-set-credentials --change-password.
+    mkdir -p -- "$ROOTFS_DIR/etc/voidling" "$ROOTFS_DIR/home/voidling" \
+        "$ROOTFS_DIR/etc/sudoers.d"
+    : >"$ROOTFS_DIR/etc/voidling/live-session"
+    hash="$(
+        cat <<'EOF'
+$6$voidlingtest$Hf9kEDiO7JpZiyt/BgjOXCxHgZSMfSZziuGe3dLNxvjAWTU9Ax.4K8ZWG2kf5uGAPnn7QAylDnQeuwQ6cgIIQ1
+EOF
+    )"
+    days="$(($(date +%s) / 86400))"
+    if [[ -f "$ROOTFS_DIR/etc/passwd" ]] && ! grep -q '^voidling:' -- "$ROOTFS_DIR/etc/passwd"; then
+        printf '%s\n' 'voidling:x:1000:1000:Voidling live:/home/voidling:/bin/bash' \
+            >>"$ROOTFS_DIR/etc/passwd"
+    fi
+    if [[ -f "$ROOTFS_DIR/etc/group" ]]; then
+        if ! grep -q '^voidling:' -- "$ROOTFS_DIR/etc/group"; then
+            printf '%s\n' 'voidling:x:1000:' >>"$ROOTFS_DIR/etc/group"
+        fi
+        if grep -q '^wheel:' -- "$ROOTFS_DIR/etc/group"; then
+            if ! grep -q '^wheel:.*voidling' -- "$ROOTFS_DIR/etc/group"; then
+                sed -i 's/^wheel:\([^:]*\):\([^:]*\):\(.*\)$/wheel:\1:\2:\3,voidling/; t; s/^wheel:\([^:]*\):\([^:]*\):$/wheel:\1:\2:voidling/' \
+                    -- "$ROOTFS_DIR/etc/group" || true
+            fi
+        else
+            printf '%s\n' 'wheel:x:4:voidling' >>"$ROOTFS_DIR/etc/group"
+        fi
+    fi
+    if [[ -f "$ROOTFS_DIR/etc/shadow" ]]; then
+        if grep -q '^root:' -- "$ROOTFS_DIR/etc/shadow"; then
+            sed -i "s|^root:[^:]*:|root:${hash}:|" -- "$ROOTFS_DIR/etc/shadow" || true
+        else
+            printf 'root:%s:%s:0:99999:7:::\n' "$hash" "$days" >>"$ROOTFS_DIR/etc/shadow"
+        fi
+        if grep -q '^voidling:' -- "$ROOTFS_DIR/etc/shadow"; then
+            sed -i "s|^voidling:[^:]*:|voidling:${hash}:|" -- "$ROOTFS_DIR/etc/shadow" || true
+        else
+            printf 'voidling:%s:%s:0:99999:7:::\n' "$hash" "$days" >>"$ROOTFS_DIR/etc/shadow"
+        fi
+        log "    live login: voidling / voidling (and root); change with voidling-set-credentials"
+    fi
+    printf '%s\n' '%wheel ALL=(ALL:ALL) ALL' >"$ROOTFS_DIR/etc/sudoers.d/voidling-wheel"
+    chmod 0440 -- "$ROOTFS_DIR/etc/sudoers.d/voidling-wheel"
+    if [[ -f "$ROOTFS_DIR/etc/issue" ]]; then
+        {
+            printf '%s\n' "Live login: voidling / voidling"
+            printf '%s\n' "Change password: sudo voidling-set-credentials --change-password"
+        } >>"$ROOTFS_DIR/etc/issue"
+    fi
 }
 
 ensure_live_mountpoints() {
@@ -822,16 +975,38 @@ main() {
     require_iso_tools
     validate_inputs
 
-    WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/voidling-iso.XXXXXX")"
+    # Prefer OUT_DIR/tmp over /tmp (tmpfs) — OSTree repo payloads are multi-GB.
+    OUT_DIR="${OUT_DIR:-$ROOT_DIR/out}"
+    if [[ -z "${TMPDIR:-}" || "$TMPDIR" == "/tmp" ]]; then
+        TMPDIR="$OUT_DIR/tmp"
+    fi
+    export TMPDIR
+    mkdir -p -- "$TMPDIR"
+
+    if [[ "${PACK_OSTREE_REPO:-0}" == "1" && "${PREPARE_INSTALL_REPO:-1}" == "1" ]]; then
+        # When the caller already pointed at a custom repo, leave it alone.
+        if [[ "$OSTREE_REPO_DIR" == "$OUT_DIR/ostree-repo" ]]; then
+            local slim
+            slim="$OUT_DIR/ostree-repo-${VARIANT}"
+            bash -- "$ROOT_DIR/tooling/ostree/prepare-install-repo.sh" \
+                --variant="$VARIANT" --output="$slim"
+            OSTREE_REPO_DIR="$slim"
+            export OSTREE_REPO_DIR
+        fi
+    fi
+
+    WORK_DIR="$(mktemp -d -- "${TMPDIR}/voidling-iso.XXXXXX")"
     trap cleanup EXIT
     ISO_WORK="$WORK_DIR/iso"
 
     mkdir -p -- "$ISO_WORK/boot/grub" "$ISO_WORK/$LIVE_DIR"
+    copy_ostree_repo_payload "$ISO_WORK"
 
     log "==> building hybrid ISO"
     log "    rootfs: $ROOTFS_DIR"
     log "    output: $ISO_PATH"
     log "    label:  $ISO_LABEL"
+    log "    tmpdir: $TMPDIR"
     log "    kernel: $KERNEL_SRC"
     if [[ -n "$INITRD_SRC" ]]; then
         log "    initrd: $INITRD_SRC"

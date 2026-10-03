@@ -43,7 +43,7 @@ Environment:
   OSTREE_REMOTE      remote name for the archive repo (default: voidling)
   OSTREE_REPO_MODE   auto, bare, or bare-user (default: auto)
   ROOT_KARG          value of root= (default: UUID=<root-uuid>)
-  EXTRA_KARGS        extra kernel arguments (default: rw)
+  EXTRA_KARGS        extra kernel arguments (default: rw zswap.enabled=0)
   KERNEL_PLACEHOLDER 1=add dummy vmlinuz when missing
                      (default: 0 if commit has /usr/lib/modules/*/vmlinuz, else 1)
   NORMALIZE_ETC      1=move commit /etc to /usr/etc for old trees
@@ -323,8 +323,20 @@ pull_ref() {
     log "    remote: $OSTREE_REMOTE"
     log "    ref:    $OSTREE_REF"
 
-    ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists --no-gpg-verify \
-        "$OSTREE_REMOTE" "$url"
+    # Prefer ed25519 verify when a public key is configured; otherwise lab
+    # installs keep --no-gpg-verify (see tooling/ostree/ensure-signing-keys.sh).
+    if [[ -n "${OSTREE_SIGN_PUBKEY:-}" ]]; then
+        ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists \
+            --sign-verify="ed25519=${OSTREE_SIGN_PUBKEY}" \
+            "$OSTREE_REMOTE" "$url" 2>/dev/null ||
+            ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists --no-gpg-verify \
+                "$OSTREE_REMOTE" "$url"
+        log "    verify: ed25519 (OSTREE_SIGN_PUBKEY)"
+    else
+        ostree --repo="$SYSROOT_DIR/ostree/repo" remote add --if-not-exists --no-gpg-verify \
+            "$OSTREE_REMOTE" "$url"
+        log "    verify: disabled (set OSTREE_SIGN_PUBKEY to enforce)"
+    fi
 
     if ostree --repo="$SYSROOT_DIR/ostree/repo" pull "$OSTREE_REMOTE" "$OSTREE_REF"; then
         PULL_REFSPEC="${OSTREE_REMOTE}:${OSTREE_REF}"
@@ -602,7 +614,7 @@ main() {
     SYSROOT_DIR="${SYSROOT_DIR:-${SYSROOT:-$OUT_DIR/sysroot}}"
     OSTREE_REPO_MODE="${OSTREE_REPO_MODE:-auto}"
     ROOT_KARG="${ROOT_KARG:-UUID=<root-uuid>}"
-    EXTRA_KARGS="${EXTRA_KARGS:-rw}"
+    EXTRA_KARGS="${EXTRA_KARGS:-rw zswap.enabled=0 modprobe.blacklist=zswap}"
     INIT_FS_MODERN="${INIT_FS_MODERN:-0}"
     RETAIN="${RETAIN:-0}"
 

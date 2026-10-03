@@ -3,11 +3,12 @@
 This directory builds **UEFI-bootable artifacts** from a composed product rootfs (`minimal` or `plasma`) that was composed with `BOOTABLE=1` (kernel + EFI GRUB):
 
 - `build-vm-uefi-qcow2.sh` — GPT disk image (ESP + ext4 root) as qcow2
+- `build-ostree-qcow2.sh` — GPT disk image with an OSTree deployment on Btrfs or ZFS
 - `boot-qemu.sh` — QEMU + OVMF launcher for that qcow2 or the live ISO
 - `build-iso.sh` — hybrid installer/live ISO (GRUB + live kargs + optional squashfs)
-- `install-live-dracut.sh` — install dmsquash-live dracut config and rebuild the initrd
+- `install-live-dracut.sh` — build `out/initramfs-$ARCH-$LIBC-$VARIANT-live.img` (does not modify the rootfs)
 
-The qcow2 prototype uses **ext4** on a simple GPT + ESP + root layout. Product filesystem choice (ZFS or Btrfs) is an installer decision and is not applied here.
+The **ext4** qcow2 (`build-vm-uefi-qcow2.sh`) uses a simple GPT + ESP + root layout without OSTree. **`build-ostree-qcow2.sh`** runs the real disk installer (Btrfs default, or ZFS with `--filesystem=zfs`); GRUB lands on the ESP via `install-bootloader.sh` when disk apply is armed.
 
 Two product images (not a third `bootable` variant):
 
@@ -64,7 +65,7 @@ sudo bash tooling/image/install-live-dracut.sh --variant=minimal
 sudo bash tooling/image/install-live-dracut.sh --variant=plasma
 ```
 
-That copies `tooling/image/live-dracut.conf` (same text as `overlays/live/etc/dracut.conf.d/50-voidling-live.conf`) into the rootfs and runs `dracut --force --no-hostonly --omit voidling-ostree`. Rebuild needs root (chroot mounts). Config-only: `--no-rebuild`.
+That writes `out/initramfs-x86_64-glibc-$VARIANT-live.img`. Dracut sees `tooling/image/live-dracut.conf` (same text as `overlays/live/etc/dracut.conf.d/50-voidling-live.conf`) through a temporary `--confdir`. The composed tree's `/boot/initramfs-*.img` and `/usr/etc` stay as compose left them. Rebuild needs root (chroot mounts). `--no-rebuild` writes nothing.
 
 `dmsquash-live` is skipped when `hostonly` is set. The live conf forces `hostonly=no` and adds iso9660/squashfs/overlay/CD/virtio drivers.
 
@@ -130,7 +131,19 @@ sudo bash tooling/image/build-vm-uefi-qcow2.sh \
 
 Output: `out/voidling-x86_64-uefi-minimal.qcow2` or `…-plasma.qcow2`
 
-The image gets a UUID-based `/etc/fstab`, a regenerated initramfs with **ext4 + virtio** and **without** the compose `voidling-ostree` module (this disk is not an OSTree sysroot), `grub-install` (UEFI, `--removable` so `EFI/BOOT/BOOTX64.EFI` exists for OVMF), and a static `/boot/grub/grub.cfg` that points at the detected kernel path (`/boot/...` or `/usr/lib/modules/...`) plus `console=tty0 console=ttyS0`.
+The image gets a UUID-based `/etc/fstab`, a regenerated initramfs with **ext4 + virtio** and **without** the compose `voidling-ostree` module (this disk is not an OSTree sysroot), `grub-install` (UEFI, `--removable` so `EFI/BOOT/BOOTX64.EFI` exists for OVMF), and a static `/boot/grub/grub.cfg` that points at the detected kernel path (`/boot/...` or `/usr/lib/modules/...`) plus `zswap.enabled=0 console=tty0 console=ttyS0`.
+
+## Build OSTree qcow2 (Btrfs or ZFS)
+
+Requires a committed archive repo (`VARIANT=… bash tooling/ostree/commit-rootfs.sh`) and **root**:
+
+```bash
+sudo bash tooling/image/build-ostree-qcow2.sh --variant=minimal --filesystem=btrfs
+sudo bash tooling/image/build-ostree-qcow2.sh --variant=minimal --filesystem=zfs
+bash tooling/image/boot-qemu.sh --image out/voidling-x86_64-uefi-ostree-btrfs.qcow2
+```
+
+The installer partitions the loop disk, deploys OSTree, and `install-bootloader.sh` runs `grub-install` plus an ESP chain that loads **`/boot/grub.cfg`** (filesystem label `VOIDLING_ROOT` on Btrfs, pool name on ZFS).
 
 ## Build ISO
 
@@ -142,6 +155,8 @@ sudo bash tooling/image/install-live-dracut.sh --variant=minimal
 sudo bash tooling/image/build-iso.sh --variant=minimal --squashfs
 bash tooling/image/boot-qemu.sh --iso --variant=minimal
 ```
+
+Plasma and plasma-fenestration ISOs boot the **minimal** live rootfs and carry `ostree-repo/` on the disc. They do not pack the desktop tree as the squashfs. Pass `--rootfs` to pack a specific tree instead.
 
 Plasma:
 
@@ -174,13 +189,13 @@ Plasma squashfs is larger than 4 GiB. `build-iso.sh` writes ISO 9660 level 3 (mu
 
 Live kernel arguments:
 
-`rd.live.image rd.overlay rd.live.dir=live rd.live.squashimg=filesystem.squashfs root=live:CDLABEL=VOIDLING console=tty0 console=ttyS0 rw`
+`rd.live.image rd.overlay rd.live.dir=live rd.live.squashimg=filesystem.squashfs root=live:CDLABEL=VOIDLING console=tty0 console=ttyS0 zswap.enabled=0 rw`
 
 A sealed compose tree has `/usr/etc` and no `/etc`. `build-iso.sh` copies `/usr/etc` → `/etc` for the squashfs only, then removes that temporary `/etc` so the compose tree stays sealed.
 
 The live squashfs also ships the installer (`voidling-installer`, `install-voidling`) plus `tooling/{installer,snapshots,ostree,boot,firstboot}` under `/usr/lib/voidling`. Those copies are removed from the compose tree after packing. Live defaults: `VARIANT` from the ISO variant, `FILESYSTEM=zfs`, staging under `/var/tmp/voidling`.
 
-A full writable live session still needs a **BOOTABLE** rootfs (`linux` + `dracut`) whose initrd was rebuilt with dmsquash-live and **without** `voidling-ostree`. The ISO builder only packs what is already in the rootfs.
+A full writable live session still needs a **BOOTABLE** rootfs (`linux` + `dracut`) and the side initrd from `install-live-dracut.sh` (dmsquash-live, without `voidling-ostree`). The ISO packs that file as `/boot/initrd`. It does not pack `/boot/initramfs-*.img` from the rootfs.
 
 ## Boot the qcow2 with QEMU + OVMF
 

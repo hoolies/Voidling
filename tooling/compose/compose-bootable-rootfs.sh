@@ -18,18 +18,25 @@ Compose a bootable Voidling rootfs for a product variant (kernel + EFI GRUB).
 
 Mandatory arguments to long options are mandatory for short options too.
 
-  -V, --variant=NAME    product variant: minimal or plasma (default: minimal)
+  -V, --variant=NAME    product variant: minimal, plasma, or plasma-fenestration
+                        (default: minimal)
   -h, --help            display this help and exit
 
 There are two product images, not a third "bootable" flavor:
 
-  minimal   no desktop environment and no window manager (console + runit)
-  plasma    full KDE Plasma experience (zsh + Bourne_Again git_config skel)
+  minimal              no desktop environment and no window manager
+  plasma               full KDE Plasma experience
+  plasma-fenestration Plasma plus the Fenestration package set
 
 This wrapper sets BOOTABLE=1 and calls the matching compose preset. Output:
 
   out/rootfs-x86_64-glibc-minimal/
   out/rootfs-x86_64-glibc-plasma/
+  out/rootfs-x86_64-glibc-plasma-fenestration/
+
+WITH_ZFS=0 omits the zfs package (btrfs-only installed image). The default
+is WITH_ZFS=1 because the installer defaults to ZFS. The live installer ISO
+is the minimal image, which keeps zfs so it can create a pool.
 
 Environment:
   VARIANT      same as --variant (flags win)
@@ -92,17 +99,20 @@ parse_args() {
 }
 
 main() {
+    local script
     parse_args "$@"
     VARIANT="${VARIANT:-minimal}"
     case "$VARIANT" in
-        minimal | plasma) ;;
+        minimal) script="compose-minimal-rootfs.sh" ;;
+        plasma) script="compose-plasma-rootfs.sh" ;;
+        plasma-fenestration) script="compose-fenestration-rootfs.sh" ;;
         *)
-            die "VARIANT must be minimal or plasma (got: $VARIANT)"
+            die "VARIANT must be minimal, plasma, or plasma-fenestration (got: $VARIANT)"
             ;;
     esac
     export VARIANT
     export BOOTABLE=1
-    exec bash -- "$ROOT_DIR/tooling/compose/compose-${VARIANT}-rootfs.sh"
+    exec bash -- "$ROOT_DIR/tooling/compose/$script"
 }
 
 main "$@"

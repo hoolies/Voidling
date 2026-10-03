@@ -39,7 +39,7 @@ This directory does **not** partition disks, install GRUB, or take ZFS snapshots
 SYSROOT_DIR="$SYSROOT" \
 VARIANT=plasma \
 ROOT_KARG="UUID=${ROOT_UUID}" \
-EXTRA_KARGS="rw" \
+EXTRA_KARGS="rw zswap.enabled=0" \
 bash tooling/ostree/deploy-sysroot.sh
 ```
 

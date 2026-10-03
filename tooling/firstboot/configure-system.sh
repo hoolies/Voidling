@@ -577,10 +577,28 @@ configure_user() {
         fi
     fi
     if [[ -f "$shadow_file" ]] && grep -q "^${USER_NAME}:" -- "$shadow_file"; then
-        :
+        if [[ "$PASSWORD_HASH" != "!" ]]; then
+            rewrite_colon_file "$shadow_file" "$USER_NAME" \
+                "${USER_NAME}:${PASSWORD_HASH}:${days}:0:99999:7:::"
+            log "    password: updated hash for $USER_NAME"
+        fi
     else
         ensure_line_file "$shadow_file" \
             "${USER_NAME}:${PASSWORD_HASH}:${days}:0:99999:7:::"
+    fi
+    # Root gets the lab hash only when explicitly requested (CI / keep-lab images).
+    # Installed systems leave root locked; users replace voidling via set-credentials.
+    if [[ "${VOIDLING_SET_ROOT_PASSWORD:-0}" == "1" || "${VOIDLING_KEEP_LAB_CREDENTIALS:-0}" == "1" ]]; then
+        if [[ "$PASSWORD_HASH" != "!" && -f "$shadow_file" ]]; then
+            if grep -q '^root:' -- "$shadow_file"; then
+                rewrite_colon_file "$shadow_file" root \
+                    "root:${PASSWORD_HASH}:${days}:0:99999:7:::"
+            else
+                ensure_line_file "$shadow_file" \
+                    "root:${PASSWORD_HASH}:${days}:0:99999:7:::"
+            fi
+            log "    password: root matches lab hash (VOIDLING_SET_ROOT_PASSWORD/KEEP_LAB)"
+        fi
     fi
 
     add_user_to_group "$group_file" wheel "$USER_NAME"
@@ -716,6 +734,27 @@ SKIP_MKFS=${skip}
     log "    storage plan: SWAP=${SWAP_PLAN} LUKS=${LUKS_PLAN} (record only)"
 }
 
+configure_credential_policy() {
+    local voidling_etc
+    if [[ "$DRY_RUN" == "1" ]]; then
+        log "dry-run: would write credential policy markers"
+        return 0
+    fi
+    voidling_etc="$ETC_DIR/voidling"
+    mkdir -p -- "$voidling_etc"
+    if [[ "${VOIDLING_KEEP_LAB_CREDENTIALS:-0}" == "1" ]]; then
+        : >"$voidling_etc/keep-lab-credentials"
+        rm -f -- "$voidling_etc/require-credential-change"
+        log "    credentials: keep lab voidling/voidling (no forced replace)"
+        return 0
+    fi
+    if [[ "$PASSWORD_HASH" != "!" ]]; then
+        : >"$voidling_etc/require-credential-change"
+        rm -f -- "$voidling_etc/keep-lab-credentials"
+        log "    credentials: require replace on first voidling login"
+    fi
+}
+
 run_sibling() {
     local script
     script="$1"
@@ -762,6 +801,7 @@ main() {
 
     configure_hostname
     configure_user
+    configure_credential_policy
     configure_locale
     configure_network
     configure_storage_plan

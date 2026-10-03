@@ -4,8 +4,8 @@ System-only snapshot automation for Voidling. Ships with **ZFS and Btrfs**
 layouts; the installer chooses one. This directory is the prototype CLI and
 the helpers the installer can call.
 
-Locked policy lives in `docs/27-filesystems-and-snapshots.md`. Prototype
-defaults and open questions are recorded here and in
+Locked policy lives in `docs/27-filesystems-and-snapshots.md`. CLI behavior
+that is not product policy is summarized in
 `docs/27-filesystems-and-snapshots-prototype.md`.
 
 ## What this is (and is not)
@@ -22,7 +22,9 @@ rollback.
 Rolling back an OSTree deployment does **not** restore `/var`. Restoring a
 `/var` snapshot does **not** change the booted deployment and is **not**
 `ostree admin undeploy`. Pair them when both the generation and mutable
-state must go back. Combining them in one boot-menu UX is still open.
+state must go back. They stay separate CLIs: the boot menu switches the
+deployment, and `restore` rolls back `@var` / `rpool/var`. Neither touches
+`/home`.
 
 **Not snapshotted by default:** `@home` / `rpool/home`.
 
@@ -38,7 +40,7 @@ state must go back. Combining them in one boot-menu UX is still open.
 Retention: last **3** automatic snapshots **per type**. **Pinned** snapshots
 are never deleted. `manual-user` is not automatic and is never pruned.
 
-## Naming (prototype default)
+## Naming
 
 ```
 voidling_<type>_<UTC-YYYYMMDDTHHMMSSZ>
@@ -46,13 +48,16 @@ voidling_<type>_<UTC-YYYYMMDDTHHMMSSZ>
 
 Example: `voidling_pre-upgrade_20260907T205900Z`
 
-## Where system-only lives (prototype default)
+## Where system-only lives
 
 | Filesystem | Snapshotted | Not snapshotted by default |
 |------------|-------------|----------------------------|
 | Btrfs | `@var` (mounted at `/var`); snapshots under `@snapshots/` | `@home` |
 | ZFS | `rpool/var`; snapshot `rpool/var@<name>` | `rpool/home` |
 | `dir` (auto-detect fallback) | metadata-only index under `SYSROOT/var/lib/voidling/snapshots/` | n/a |
+
+`/etc` is on the OSTree sysroot (`@`, `rpool/ROOT`), so deployment rollback
+moves it. A `/var` snapshot does not.
 
 The `dir` backend is a **directory prototype**: it records snapshot metadata
 and a `MANIFEST`. It does **not** copy `/var`. Use it with `--sysroot` in
@@ -187,19 +192,10 @@ $SYSROOT/var/lib/voidling/snapshots/last-restore
 
 Snapshots created outside this tool are invisible to prune/pin/restore.
 
-## Open questions
+## Policy
 
-1. **Naming scheme** — prototype uses `voidling_<type>_<UTC-YYYYMMDDTHHMMSSZ>`.
-   Confirm or replace (collision if two creates share the same UTC second).
-2. **Where system-only lives** — prototype uses `@var` / `rpool/var` and
-   leaves `@home` / `rpool/home` alone. Confirm `/etc` OSTree overlays,
-   `/var/lib/containers`, logs, and other writable islands.
-3. **Rollback UX** — restore is this CLI only (`restore NAME`). OSTree
-   undeploy / boot-menu rollback stay separate. Should `@var` restore
-   appear in the boot menu or be paired with a deployment?
-4. **Should `create` auto-`prune`?** The pre-upgrade hook does; the raw
-   CLI does not.
-5. **ZFS pool name** if the installer does not use `rpool`.
-6. **Btrfs toplevel mount** on a running host (`subvolid=5` vs `/`).
-7. **Should `manual-user` ever expire?** Prototype: never, unless we add
-   an explicit delete command (not implemented).
+Naming, scope, retention, and the split between boot-menu rollback and
+`restore` are locked in `docs/27-filesystems-and-snapshots.md`. This README
+describes the CLI that implements that lock. A second create of the same
+type in the same UTC second fails (`snapshot already exists`). There is no
+`delete` subcommand; `manual-user` and pinned snapshots are kept.

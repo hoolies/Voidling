@@ -1,9 +1,10 @@
 # First-boot / installer extras
 
 Hostname, a wheel/sudo user, locale, NetworkManager, Flatpak (Flathub),
-and Distrobox/AppImage policy. Optional swap and LUKS are **documented
-flags only** (default off). This folder never runs `xbps-install` on the
-host or SYSROOT.
+and Distrobox/AppImage policy. Optional swap and LUKS default **off**. Directory mode records a **plan
+only**; disk apply with `--luks-passphrase-file` formats LUKS2 in
+`install-voidling.sh`. This folder never runs `xbps-install` on the host
+or SYSROOT.
 
 ## What the installer should call
 
@@ -70,18 +71,21 @@ Policy only (`apps-policy.sh` / `etc/voidling/apps-policy`):
 See `tooling/container/README.md`. Distrobox may install helpers inside
 the container; that does not change the immutable host.
 
-## Encryption and swap (plan-only)
+## Encryption and swap
 
 Default **off**. Directory mode **never** requires LUKS and never creates
-swap.
+disk swap.
 
-| Flag | Installer | `configure-system.sh` | What happens in dir mode |
-|------|-----------|------------------------|--------------------------|
-| `--swap` | records `SWAP=1` in `plan.env` | writes `etc/voidling/storage-plan.env` | plan only |
-| `--luks` | records `LUKS=1` in `plan.env` | same file | plan only |
+| Flag | Installer | `configure-system.sh` | Dir mode | Disk apply (`--i-understand-this-wipes-disks`) |
+|------|-----------|------------------------|----------|-----------------------------------------------|
+| `--swap` | records `SWAP=1` in `plan.env` | writes `etc/voidling/storage-plan.env` | plan only | plan only (no swap partition yet) |
+| `--luks` | records `LUKS=1` in `plan.env` | same file | plan only | LUKS2 on root part when `--luks-passphrase-file` is set; `crypttab` + `rd.luks.uuid` karg |
 
-Still not implemented (other owners): `cryptsetup`, `mkswap`, `mkfs`,
-fstab swap lines, TPM, or a wiping disk installer.
+Still not implemented here: disk swap partition/file, fstab swap lines, TPM,
+or a production TUI installer.
+
+zram swap is separate and on by default (`voidling-zram`). `--swap` does
+not turn it on or off.
 
 ## Dir-mode test (fake sysroot)
 

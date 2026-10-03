@@ -188,7 +188,7 @@ Non-root / sandbox: `init-fs` / `deploy` may fail on xattrs or permissions. The 
 - `OSTREE_REPO_DIR` (default: `OUT_DIR/ostree-repo`)
 - `OSTREE_REPO_MODE` (`auto` / `bare` / `bare-user`)
 - `ROOT_KARG` (default: `UUID=<root-uuid>`)
-- `EXTRA_KARGS` (default: `rw`)
+- `EXTRA_KARGS` (default: `rw zswap.enabled=0`)
 - `KERNEL_PLACEHOLDER` (default: `0` if the commit has vmlinuz, else `1`)
 - `NORMALIZE_ETC` (default: `0` if the commit is sealed `/usr/etc` only, else `1`)
 - `OSTREE_BOOTLOADER` (default: `none`; do not install GRUB from this script)

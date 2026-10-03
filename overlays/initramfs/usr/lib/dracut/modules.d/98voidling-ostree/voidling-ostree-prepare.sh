@@ -2,7 +2,7 @@
 # Honor ostree= in the initramfs (runit, no systemd as PID 1).
 # Dracut pre-pivot: prepare /sysroot and return so dracut can switch-root.
 # When PID 1 or --exec-init: prepare, then exec /sbin/init (runit).
-set -eu
+# Do not set -eu at top level: this file is sourced by dracut hooks.
 
 unalias -a 2>/dev/null || true
 unset -f printf cat 2>/dev/null || true
@@ -263,9 +263,15 @@ exec_real_init() {
 
 main() {
     parse_args "$@"
-    if [ "$$" -eq 1 ]; then
-        EXEC_INIT=1
-    fi
+    # Do not treat "sourced under dracut's PID 1 /init" as --exec-init.
+    # pre-pivot hooks must return so dracut can switch-root.
+    case $0 in
+        */voidling-ostree-prepare | voidling-ostree-prepare)
+            if [ "$$" -eq 1 ]; then
+                EXEC_INIT=1
+            fi
+            ;;
+    esac
     default_sysroot
     reject_dashed_path sysroot "$SYSROOT"
     reject_dashed_path init "$INIT"
@@ -285,4 +291,17 @@ main() {
     exec_real_init
 }
 
-main "$@"
+# Dracut pre-pivot hooks are sourced under /init. Keep set -eu inside a
+# subshell so nounset does not leak and kill switch-root.
+case ${0##*/} in
+    voidling-ostree-prepare | voidling-ostree-prepare.sh)
+        set -eu
+        main "$@"
+        ;;
+    *)
+        (
+            set -eu
+            main "$@"
+        )
+        ;;
+esac

@@ -56,6 +56,8 @@ Mandatory arguments to long options are mandatory for short options too.
       --extra-kargs=STR extra kernel arguments (space-separated)
       --timeout=SECS    GRUB timeout in seconds (default: 5)
       --search-label=L  GRUB search --label (default: VOIDLING_ROOT; empty skips)
+      --root-fs-uuid=U  GRUB search --fs-uuid instead of --label
+      --root-subvol=S   after search, set root=(\$root)/S (e.g. @ on Btrfs)
       --boot-prefix=P   prefix GRUB linux/initrd paths (e.g. /boot; default empty)
   -l, --list            list deployments and exit
       --emit-grub       write a GRUB snippet to stdout only
@@ -185,6 +187,24 @@ parse_args() {
                 SEARCH_LABEL="${1#--search-label=}"
                 shift
                 ;;
+            --root-fs-uuid)
+                require_value "$1" "${2:-}"
+                ROOT_FS_UUID="$2"
+                shift 2
+                ;;
+            --root-fs-uuid=*)
+                ROOT_FS_UUID="${1#--root-fs-uuid=}"
+                shift
+                ;;
+            --root-subvol)
+                require_value "$1" "${2:-}"
+                ROOT_SUBVOL="$2"
+                shift 2
+                ;;
+            --root-subvol=*)
+                ROOT_SUBVOL="${1#--root-subvol=}"
+                shift
+                ;;
             --boot-prefix)
                 require_value "$1" "${2:-}"
                 BOOT_PREFIX="$2"
@@ -219,6 +239,8 @@ resolve_defaults() {
     EXTRA_KARGS="${EXTRA_KARGS:-}"
     GRUB_TIMEOUT="${GRUB_TIMEOUT:-5}"
     SEARCH_LABEL="${SEARCH_LABEL-VOIDLING_ROOT}"
+    ROOT_FS_UUID="${ROOT_FS_UUID:-}"
+    ROOT_SUBVOL="${ROOT_SUBVOL:-}"
     BOOT_PREFIX="${BOOT_PREFIX:-${VOIDLING_BOOT_PREFIX:-}}"
     VARIANT="${VARIANT:-unknown}"
 
@@ -239,11 +261,27 @@ resolve_defaults() {
 
 prefix_boot_path() {
     local path="$1"
+    local full=""
     if [[ -z "$BOOT_PREFIX" ]]; then
-        printf '%s\n' "$path"
-        return 0
+        full="$path"
+    else
+        full="${BOOT_PREFIX%/}${path}"
     fi
-    printf '%s%s\n' "${BOOT_PREFIX%/}" "$path"
+    if [[ -n "$ROOT_SUBVOL" ]]; then
+        case "$full" in
+            /boot/*)
+                # Absolute path on the Btrfs FS_TREE: /$subvol/boot/...
+                full="/${ROOT_SUBVOL}${full}"
+                ;;
+            /ostree/*)
+                full="/${ROOT_SUBVOL}/boot${full}"
+                ;;
+        esac
+        # Force device-relative open so GRUB does not resolve against a
+        # stale \$root after configfile.
+        full="(\$root)${full}"
+    fi
+    printf '%s\n' "$full"
 }
 
 entry_title() {
@@ -299,8 +337,6 @@ emit_grub_menuentries() {
         cat <<EOF
 menuentry '${title}' --class voidling --class ostree --class gnu-linux --id '${entry_id}' {
     insmod gzio
-    insmod ext2
-    insmod xfs
     insmod btrfs
     linux ${linux_path} ${_vbl_dep_options[$i]}
     initrd ${initrd_path}
@@ -330,11 +366,23 @@ set timeout=${GRUB_TIMEOUT}
 insmod part_gpt
 insmod gzio
 EOF
-    if [[ -n "$SEARCH_LABEL" ]]; then
-        cat <<EOF
-search --no-floppy --label ${SEARCH_LABEL} --set=root
+    if [[ -n "$ROOT_SUBVOL" ]]; then
+            # ESP chain already set \$root to the Btrfs device. Re-running
+            # search here can clear \$root when modules are not on \$prefix yet.
+            cat <<EOF
+set prefix=(\$root)/${ROOT_SUBVOL}/boot/grub
 EOF
-    fi
+        elif [[ -n "$ROOT_FS_UUID" ]]; then
+            cat <<EOF
+search --no-floppy --fs-uuid ${ROOT_FS_UUID} --set=root
+set prefix=(\$root)/boot/grub
+EOF
+        elif [[ -n "$SEARCH_LABEL" ]]; then
+            cat <<EOF
+search --no-floppy --label ${SEARCH_LABEL} --set=root
+set prefix=(\$root)/boot/grub
+EOF
+        fi
     emit_grub_snippet
 }
 

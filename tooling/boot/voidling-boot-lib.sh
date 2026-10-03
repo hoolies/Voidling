@@ -213,11 +213,24 @@ _vbl_linux_relpath() {
     local osname="$2"
     local checksum="$3"
     local kver="$4"
-    local bootcsum linux
+    local bootcsum linux target
     bootcsum="$(_vbl_bootcsum_dir "$sysroot" "$osname" "$checksum" "$kver")"
     linux="/ostree/${bootcsum}/vmlinuz-${kver}"
     if [[ "$kver" == "KVER" ]]; then
         linux="/ostree/${bootcsum}/vmlinuz"
+    fi
+    # GRUB cannot follow absolute symlinks like /boot/vmlinuz-KVER. Prefer a
+    # real file under /boot when the ostree boot entry is only a link.
+    if [[ -L "$sysroot/boot${linux}" ]]; then
+        target="$(readlink -- "$sysroot/boot${linux}")"
+        case "$target" in
+            /boot/*)
+                if [[ -e "$sysroot$target" ]]; then
+                    printf '%s\n' "$target"
+                    return 0
+                fi
+                ;;
+        esac
     fi
     if [[ -e "$sysroot/boot${linux}" ]]; then
         printf '%s\n' "$linux"
@@ -225,6 +238,10 @@ _vbl_linux_relpath() {
     fi
     if [[ -e "$sysroot/boot/ostree/${bootcsum}/vmlinuz" ]]; then
         printf '%s\n' "/ostree/${bootcsum}/vmlinuz"
+        return 0
+    fi
+    if [[ -e "$sysroot/boot/vmlinuz-${kver}" ]]; then
+        printf '%s\n' "/boot/vmlinuz-${kver}"
         return 0
     fi
     printf '%s\n' "$linux"
@@ -254,6 +271,21 @@ _vbl_initrd_relpath() {
     return 0
 }
 
+_vbl_ensure_zswap_disabled() {
+    local opts="$1"
+    if [[ " $opts " != *" zswap.enabled=0 "* ]]; then
+        if [[ -n "$opts" ]]; then
+            opts="${opts} zswap.enabled=0"
+        else
+            opts="zswap.enabled=0"
+        fi
+    fi
+    if [[ " $opts " != *" modprobe.blacklist=zswap "* ]]; then
+        opts="${opts} modprobe.blacklist=zswap"
+    fi
+    printf '%s\n' "$opts"
+}
+
 _vbl_default_options() {
     local root_karg="$1"
     local extra_kargs="$2"
@@ -263,7 +295,7 @@ _vbl_default_options() {
     if [[ -n "$extra_kargs" ]]; then
         opts="${opts} ${extra_kargs}"
     fi
-    printf '%s\n' "$opts"
+    _vbl_ensure_zswap_disabled "$opts"
 }
 
 _vbl_loader_entry_dirs() {
@@ -622,7 +654,7 @@ _vbl_overlay_bls() {
                     _vbl_dep_initrd[idx]="$_vbl_bls_initrd"
                 fi
                 if [[ -n "$_vbl_bls_options" ]]; then
-                    _vbl_dep_options[idx]="$_vbl_bls_options"
+                    _vbl_dep_options[idx]="$(_vbl_ensure_zswap_disabled "$_vbl_bls_options")"
                 fi
                 if [[ -n "$_vbl_bls_title" ]]; then
                     _vbl_dep_title[idx]="$_vbl_bls_title"
@@ -639,7 +671,7 @@ _vbl_overlay_bls() {
                     "${_vbl_bls_linux:-/ostree/${osname}-BOOTCSUM/vmlinuz}" \
                     "${_vbl_bls_initrd:-/ostree/${osname}-BOOTCSUM/initramfs.img}" \
                     "KVER" \
-                    "${_vbl_bls_options:-$(_vbl_default_options "$root_karg" "$extra_kargs" "$ostree_karg")}" \
+                    "$(_vbl_ensure_zswap_disabled "${_vbl_bls_options:-$(_vbl_default_options "$root_karg" "$extra_kargs" "$ostree_karg")}")" \
                     "$_vbl_bls_title"
             fi
         done

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Install dracut live/dmsquash config into a Voidling bootable rootfs
-# and rebuild the initramfs with hostonly=no.
+# Build a dmsquash-live initrd beside a Voidling rootfs.
+# Does not copy dracut config into the tree and does not replace
+# /boot/initramfs-*.img (that file is the OSTree initrd).
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
 unset -f printf cat mkdir rm cp mv mount umount chroot id date stat \
     readlink basename dirname find command sort tail awk grep lsinitrd \
-    dracut 2>/dev/null || true
+    mktemp chmod dracut 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
 export LC_ALL=C
@@ -20,34 +21,39 @@ readonly LIVE_CONF_NAME="50-voidling-live.conf"
 WANT_REBUILD=1
 MOUNTS=()
 ETC_BIND=""
+STAGE_TMP=""
 
 usage() {
     cat <<EOF
 Usage: $PROGNAME [OPTION]...
-Install dracut live/dmsquash config into a bootable Voidling rootfs.
+Build a dmsquash-live initrd next to a bootable Voidling rootfs.
 
 Mandatory arguments to long options are mandatory for short options too.
 
   -V, --variant=NAME    product variant: minimal or plasma (default: minimal)
   -r, --rootfs DIR      rootfs directory (default:
                         OUT_DIR/rootfs-ARCH-LIBC-VARIANT)
-      --no-rebuild      install config only; do not run dracut
+  -o, --output FILE     live initrd path (default:
+                        OUT_DIR/initramfs-ARCH-LIBC-VARIANT-live.img)
+      --no-rebuild      do not run dracut and do not write an image
   -h, --help            display this help and exit
 
-A full live ISO needs this config in the composed tree and an initrd rebuilt
-with dmsquash-live + overlayfs (hostonly=no). The live initrd omits
-voidling-ostree (squashfs, not an OSTree sysroot). BOOTABLE compose does not
-do this; run after compose-bootable-rootfs.sh, then build-iso.sh.
+The composed tree keeps its OSTree initrd (/boot/initramfs-*.img) and does
+not receive the live dracut snippet. Dracut reads that snippet from a
+temporary directory. The image omits voidling-ostree (squashfs, not an
+OSTree sysroot). Run after compose-bootable-rootfs.sh, then build-iso.sh.
 
 Rebuild requires root (chroot bind-mounts). --no-rebuild needs no root.
+Successful output is the image path on stdout.
 
 Environment:
   ROOTFS_DIR     rootfs directory
   OUT_DIR        output directory (default: <repo>/out)
+  LIVE_INITRD    same as --output
   TARGET_ARCH    architecture (default: x86_64)
   TARGET_LIBC    libc (default: glibc)
   VARIANT        product variant: minimal or plasma (default: minimal)
-  CONF_FILE      dracut snippet to copy (default:
+  CONF_FILE      dracut snippet (default: overlays/live or
                  <repo>/tooling/image/live-dracut.conf)
   OVERLAY_DIR    live overlay (default: <repo>/overlays/live)
 EOF
@@ -100,6 +106,16 @@ parse_args() {
                 WANT_REBUILD=0
                 shift
                 ;;
+            -o | --output)
+                require_arg "$@"
+                LIVE_INITRD="$2"
+                shift 2
+                ;;
+            --output=*)
+                LIVE_INITRD="${1#--output=}"
+                [[ -n "$LIVE_INITRD" ]] || usage_error "option requires an argument -- 'output'"
+                shift
+                ;;
             --)
                 shift
                 if [[ $# -gt 0 ]]; then
@@ -137,6 +153,7 @@ resolve_defaults() {
             ;;
     esac
     ROOTFS_DIR="${ROOTFS_DIR:-$OUT_DIR/rootfs-$TARGET_ARCH-$TARGET_LIBC-$VARIANT}"
+    LIVE_INITRD="${LIVE_INITRD:-$OUT_DIR/initramfs-$TARGET_ARCH-$TARGET_LIBC-$VARIANT-live.img}"
     OVERLAY_DIR="${OVERLAY_DIR:-$ROOT_DIR/overlays/live}"
     if [[ -z "${CONF_FILE:-}" ]]; then
         if [[ -f "$OVERLAY_DIR/etc/dracut.conf.d/$LIVE_CONF_NAME" ]]; then
@@ -178,6 +195,10 @@ cleanup() {
         rmdir -- "$ETC_BIND" 2>/dev/null || true
         ETC_BIND=""
     fi
+    if [[ -n "$STAGE_TMP" && -e "$STAGE_TMP" ]]; then
+        rm -f -- "$STAGE_TMP"
+        STAGE_TMP=""
+    fi
 }
 
 validate_inputs() {
@@ -198,33 +219,6 @@ validate_inputs() {
     fi
     ROOTFS_DIR="$(cd -- "$ROOTFS_DIR" && pwd)"
     CONF_FILE="$(cd -- "$(dirname -- "$CONF_FILE")" && pwd)/$(basename -- "$CONF_FILE")"
-}
-
-conf_dest_dirs() {
-    local -a dirs=()
-    if [[ -d "$ROOTFS_DIR/etc" && ! -L "$ROOTFS_DIR/etc" ]]; then
-        dirs+=("$ROOTFS_DIR/etc/dracut.conf.d")
-    fi
-    if [[ -d "$ROOTFS_DIR/usr/etc" ]]; then
-        dirs+=("$ROOTFS_DIR/usr/etc/dracut.conf.d")
-    fi
-    if ((${#dirs[@]} == 0)); then
-        dirs+=("$ROOTFS_DIR/etc/dracut.conf.d")
-    fi
-    printf '%s\n' "${dirs[@]}"
-}
-
-install_conf() {
-    local dest_dir dest
-    INSTALLED_CONFS=()
-    while IFS= read -r dest_dir; do
-        [[ -n "$dest_dir" ]] || continue
-        mkdir -p -- "$dest_dir"
-        dest="$dest_dir/$LIVE_CONF_NAME"
-        cp -- "$CONF_FILE" "$dest"
-        INSTALLED_CONFS+=("$dest")
-        log "    wrote: $dest"
-    done < <(conf_dest_dirs)
 }
 
 warn_missing_dmsetup() {
@@ -272,6 +266,20 @@ collect_kernel_versions() {
     fi
 }
 
+latest_line() {
+    sort | tail -n 1
+}
+
+pick_kver() {
+    collect_kernel_versions
+    if ((${#KERNEL_VERS[@]} == 1)); then
+        printf '%s\n' "${KERNEL_VERS[0]}"
+        return 0
+    fi
+    log "note: multiple kernels; building the live initrd for the newest name"
+    printf '%s\n' "${KERNEL_VERS[@]}" | latest_line
+}
+
 record_mount() {
     local p="$1"
     MOUNTS+=("$p")
@@ -304,9 +312,29 @@ ensure_etc_for_chroot() {
     mount --bind -- "$ROOTFS_DIR/usr/etc" "$ETC_BIND"
 }
 
-rebuild_initrds() {
-    local kver img dracut_bin
-    local -a rebuilt=()
+prepare_live_dracut_dirs() {
+    local live_root="$ROOTFS_DIR/run/voidling-live"
+    mkdir -p -- "$live_root/conf.d" "$live_root/tmp"
+    cp -- "$CONF_FILE" "$live_root/conf.d/$LIVE_CONF_NAME"
+    printf '%s\n' '# Voidling live initrd. Module policy is conf.d/50-voidling-live.conf.' \
+        >"$live_root/dracut.conf"
+}
+
+publish_live_initrd() {
+    local built="$ROOTFS_DIR/run/voidling-live/initramfs.img"
+    local dest_dir
+    [[ -s "$built" ]] || die "dracut did not write the live initrd"
+    dest_dir="$(dirname -- "$LIVE_INITRD")"
+    mkdir -p -- "$dest_dir"
+    STAGE_TMP="$(mktemp -- "$dest_dir/initramfs-live.XXXXXX")"
+    cp -- "$built" "$STAGE_TMP"
+    chmod 0644 -- "$STAGE_TMP"
+    mv -f -- "$STAGE_TMP" "$LIVE_INITRD"
+    STAGE_TMP=""
+}
+
+rebuild_initrd() {
+    local kver dracut_bin
 
     if [[ "$(id -u)" -ne 0 ]]; then
         die "rebuild requires root (chroot mounts); rerun as root or pass --no-rebuild"
@@ -314,10 +342,9 @@ rebuild_initrds() {
     need mount
     need umount
     need chroot
+    need mktemp
 
-    collect_kernel_versions
-    mkdir -p -- "$ROOTFS_DIR/boot" "$ROOTFS_DIR/var/tmp"
-
+    kver="$(pick_kver)"
     if [[ -x "$ROOTFS_DIR/usr/bin/dracut" ]]; then
         dracut_bin=/usr/bin/dracut
     else
@@ -326,20 +353,21 @@ rebuild_initrds() {
 
     bind_chroot_mounts
     ensure_etc_for_chroot
+    prepare_live_dracut_dirs
 
-    for kver in "${KERNEL_VERS[@]}"; do
-        img="/boot/initramfs-${kver}.img"
-        log "==> rebuilding $img (hostonly=no, dmsquash-live, omit voidling-ostree)"
-        chroot -- "$ROOTFS_DIR" "$dracut_bin" --force --no-hostonly \
-            --omit voidling-ostree \
-            --omit zfs \
-            --add-drivers "iso9660 squashfs overlay loop sr_mod cdrom virtio_blk virtio_pci virtio_scsi ahci sd_mod zfs" \
-            -- "$img" "$kver"
-        rebuilt+=("$ROOTFS_DIR$img")
-        chmod 0644 -- "$ROOTFS_DIR$img" || true
-    done
-
-    REBUILT_INITRDS=("${rebuilt[@]}")
+    log "==> building live initrd for $kver"
+    log "    output: $LIVE_INITRD"
+    log "    rootfs left unchanged (OSTree initrd and /usr/etc)"
+    chroot -- "$ROOTFS_DIR" "$dracut_bin" --force \
+        --conf /run/voidling-live/dracut.conf \
+        --confdir /run/voidling-live/conf.d \
+        --tmpdir /run/voidling-live/tmp \
+        --no-hostonly --no-hostonly-cmdline \
+        --omit "voidling-ostree zfs 02zfsexpandknowledge" \
+        --add "dmsquash-live overlayfs pollcdrom" \
+        --add-drivers "iso9660 squashfs overlay loop sr_mod cdrom virtio_blk virtio_pci virtio_scsi ahci sd_mod zfs" \
+        -- /run/voidling-live/initramfs.img "$kver"
+    publish_live_initrd
 }
 
 main() {
@@ -350,25 +378,18 @@ main() {
 
     trap cleanup EXIT
 
-    log "==> installing live dracut config"
+    log "==> live initrd"
     log "    rootfs: $ROOTFS_DIR"
-    log "    source: $CONF_FILE"
-    install_conf
-
-    REBUILT_INITRDS=()
+    log "    conf:   $CONF_FILE"
     if [[ "$WANT_REBUILD" -eq 1 ]]; then
-        rebuild_initrds
+        rebuild_initrd
+        log "==> done"
+        printf '%s\n' "$LIVE_INITRD"
     else
         log "==> skipping initrd rebuild (--no-rebuild)"
+        log "    rootfs was not modified"
         log "    rebuild later with: sudo $PROGNAME --rootfs $ROOTFS_DIR"
-    fi
-
-    log "==> done"
-    if ((${#INSTALLED_CONFS[@]} > 0)); then
-        printf '%s\n' "${INSTALLED_CONFS[@]}"
-    fi
-    if ((${#REBUILT_INITRDS[@]} > 0)); then
-        printf '%s\n' "${REBUILT_INITRDS[@]}"
+        log "==> done"
     fi
 }
 

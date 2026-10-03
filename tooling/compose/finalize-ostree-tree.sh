@@ -99,12 +99,20 @@ finalize_etc() {
     log "    moved /etc -> /usr/etc"
 }
 
+ensure_ostree_dirs() {
+    # ostree-prepare-root MS_BIND needs an empty /sysroot in the deployment.
+    mkdir -p -- "$ROOTFS_DIR/sysroot"
+    chmod 0755 -- "$ROOTFS_DIR/sysroot"
+    log "    ensured /sysroot"
+}
+
 main() {
     parse_args "$@"
     [[ -d "$ROOTFS_DIR" ]] || die "ROOTFS_DIR does not exist: $ROOTFS_DIR"
     log "==> finalizing OSTree tree"
     log "    rootfs: $ROOTFS_DIR"
     finalize_etc
+    ensure_ostree_dirs
     log "==> done"
 }
 

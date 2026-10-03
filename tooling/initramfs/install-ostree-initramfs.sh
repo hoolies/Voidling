@@ -256,7 +256,9 @@ main() {
     parse_args "$@"
     OVERLAY_DIR="${OVERLAY_DIR:-$ROOT_DIR/overlays/initramfs}"
     [[ -d "$ROOTFS_DIR" ]] || die "ROOTFS_DIR does not exist: $ROOTFS_DIR"
+    ROOTFS_DIR="$(cd -- "$ROOTFS_DIR" && pwd)"
     [[ -d "$OVERLAY_DIR" ]] || die "OVERLAY_DIR does not exist: $OVERLAY_DIR"
+    OVERLAY_DIR="$(cd -- "$OVERLAY_DIR" && pwd)"
 
     log "==> installing ostree initramfs module"
     log "    rootfs:  $ROOTFS_DIR"

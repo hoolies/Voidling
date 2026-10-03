@@ -14,6 +14,9 @@ ROOT_DIR="$(cd -- "${BOOT_DIR}/../.." && pwd)"
 readonly ROOT_DIR
 readonly DROPIN_SRC="${BOOT_DIR}/15_voidling"
 
+# shellcheck source=voidling-grub-esp.sh
+. "${BOOT_DIR}/voidling-grub-esp.sh"
+
 usage() {
     cat <<EOF
 Usage: $PROGNAME [OPTION]...
@@ -34,6 +37,11 @@ Environment:
   DRY_RUN                   1=plan only
   ROOT_KARG                 root= kernel argument
   OSNAME / OSTREE_OSNAME    stateroot (default: voidling)
+  APPLY_DISK                1=run grub-install and ESP chain (disk install)
+  FILESYSTEM                btrfs or zfs (ESP chain selection)
+  ROOT_LABEL                Btrfs/ZFS search label (default: VOIDLING_ROOT)
+  ZPOOL_NAME                ZFS pool name when FILESYSTEM=zfs
+  ROOT_FS_UUID              Btrfs/ext4 root filesystem UUID for ESP search
 EOF
 }
 
@@ -119,6 +127,36 @@ EOF
     fi
 }
 
+install_grub_esp() {
+    local chain_path efi_path
+    local filesystem="${FILESYSTEM:-btrfs}"
+    local root_label="${ROOT_LABEL:-VOIDLING_ROOT}"
+    local zpool_name="${ZPOOL_NAME:-}"
+    local root_fs_uuid="${ROOT_FS_UUID:-}"
+    local luks_uuid="${LUKS_UUID:-}"
+
+    [[ -d "$ESP_DIR" ]] || die "ESP_DIR is not a directory: $ESP_DIR"
+    case "$filesystem" in
+        btrfs | zfs) ;;
+        *)
+            die "FILESYSTEM must be btrfs or zfs for grub-install (got: $filesystem)"
+            ;;
+    esac
+    if [[ "$filesystem" == "zfs" && -z "$zpool_name" ]]; then
+        die "ZPOOL_NAME is required when FILESYSTEM=zfs"
+    fi
+    log "==> grub-install onto ESP"
+    vge_grub_install_efi "$ESP_DIR" "$SYSROOT" "$TARGET_ARCH" "$BOOTLOADER_ID"
+    chain_path="$(vge_write_esp_chain "$ESP_DIR" "$filesystem" "$root_label" \
+        "$zpool_name" "$root_fs_uuid" "$luks_uuid")"
+    log "    esp chain: $chain_path"
+    if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+        efi_path="$(vge_write_removable_efi "$ESP_DIR" "$filesystem" "$root_label" \
+            "$zpool_name" "$root_fs_uuid" "$luks_uuid")"
+        log "    removable: $efi_path"
+    fi
+}
+
 generate_menu() {
     local -a cmd
     cmd=("${BOOT_DIR}/generate-boot-menu.sh" --sysroot="$SYSROOT" --osname="$OSNAME")
@@ -131,6 +169,18 @@ generate_menu() {
                 cmd+=(--root-karg="root=$ROOT_KARG")
                 ;;
         esac
+    fi
+    if [[ -n "${EXTRA_KARGS:-}" ]]; then
+        cmd+=(--extra-kargs="$EXTRA_KARGS")
+    fi
+    if [[ -n "${VOIDLING_BOOT_PREFIX:-}" ]]; then
+        cmd+=(--boot-prefix="${VOIDLING_BOOT_PREFIX}")
+    fi
+    if [[ "${FILESYSTEM:-}" == "btrfs" ]]; then
+        cmd+=(--root-subvol=@)
+    fi
+    if [[ -n "${ROOT_FS_UUID:-}" ]]; then
+        cmd+=(--root-fs-uuid="${ROOT_FS_UUID}")
     fi
     bash -- "${cmd[@]}"
 }
@@ -172,7 +222,11 @@ main() {
                 warn "after deploy, run: bash tooling/boot/generate-boot-menu.sh --sysroot=$SYSROOT"
                 warn "later upgrades: bash tooling/boot/voidling-upgrade.sh --apply --sysroot=$SYSROOT"
             fi
-            log "    note: grub-install --target=${TARGET_ARCH}-efi --efi-directory=$ESP_DIR --bootloader-id=$BOOTLOADER_ID is deferred to a real ESP"
+            if [[ "${APPLY_DISK:-0}" == "1" ]]; then
+                install_grub_esp
+            else
+                log "    note: grub-install skipped (set APPLY_DISK=1 on a mounted ESP to install EFI files)"
+            fi
             ;;
         uki)
             die "BOOTLOADER=uki is not implemented yet"

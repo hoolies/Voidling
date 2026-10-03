@@ -127,6 +127,14 @@ apply_layout() {
     run_or_print btrfs subvolume create -- "$MOUNTPOINT/@var"
     run_or_print btrfs subvolume create -- "$MOUNTPOINT/@home"
     run_or_print btrfs subvolume create -- "$MOUNTPOINT/@snapshots"
+    if [[ "$APPLY" -eq 1 ]]; then
+        local subvol_id
+        subvol_id="$(btrfs subvolume list -- "$MOUNTPOINT" | awk '$NF == "@" { print $2; exit }')"
+        [[ -n "$subvol_id" ]] || die "could not find subvolume id for @"
+        run_or_print btrfs subvolume set-default "$subvol_id" "$MOUNTPOINT"
+    else
+        emit_note "btrfs subvolume set-default <id of @> MOUNTPOINT"
+    fi
 }
 
 parse_args() {

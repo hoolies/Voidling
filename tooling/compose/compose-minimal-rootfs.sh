@@ -14,7 +14,8 @@ readonly ROOT_DIR
 # Void's smallest official meta that still includes runit + POSIX userland.
 # runit-void is already a dependency of base-container.
 readonly CONTAINER_PKGS="base-container ca-certificates"
-readonly BOOTABLE_PKGS="base-minimal runit-void ca-certificates linux grub-x86_64-efi dracut ostree e2fsprogs iproute2 zfs"
+readonly BOOTABLE_PKGS="base-minimal runit-void ca-certificates linux grub-x86_64-efi dracut ostree e2fsprogs btrfs-progs iproute2 cryptsetup openssl shadow"
+readonly ZFS_BOOT_PKGS="zfs"
 
 # Drop non-essential deps: full glibc locale archive, nvi editor, and which(1)
 # (non-POSIX; prefer command -v). Locale stays C/POSIX.
@@ -33,6 +34,7 @@ No Plasma, no X11/Wayland session, POSIX /bin/sh via dash.
 
 Environment:
   BOOTABLE     1=add kernel + EFI GRUB + dracut (VM/ISO). Default: container seed.
+  WITH_ZFS     1=add zfs on a bootable image (default). 0=btrfs-only image.
   PKGS         override package list
   IGNOREPKGS   packages to ignore via xbps.d (default: glibc-locales nvi which)
   OUT_DIR      output directory (passed through to compose-rootfs.sh)
@@ -73,6 +75,14 @@ main() {
     export VARIANT=minimal
     if [[ "${BOOTABLE:-0}" == "1" ]]; then
         default_pkgs="$BOOTABLE_PKGS"
+        case "${WITH_ZFS:-1}" in
+            0) ;;
+            1) default_pkgs="$default_pkgs $ZFS_BOOT_PKGS" ;;
+            *)
+                printf '%s: WITH_ZFS must be 0 or 1 (got: %s)\n' "$PROGNAME" "$WITH_ZFS" >&2
+                exit 1
+                ;;
+        esac
     else
         default_pkgs="$CONTAINER_PKGS"
     fi
@@ -85,6 +95,7 @@ main() {
     fi
     if [[ "${SKIP_SEAL:-0}" != "1" ]]; then
         bash -- "$ROOT_DIR/tooling/compose/apply-immutable-overlay.sh" -- "$rootfs"
+        bash -- "$ROOT_DIR/tooling/compose/apply-product-clis.sh" -- "$rootfs"
         bash -- "$ROOT_DIR/tooling/compose/finalize-ostree-tree.sh" -- "$rootfs"
     fi
 }

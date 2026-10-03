@@ -141,8 +141,15 @@ create-*-layout scripts with `--apply` and unsets `SKIP_MKFS`.
 
 This installer does not run `xbps-install` on the target.
 
-`--swap` and `--luks` only record a storage plan (default off). They do not
-create swap or LUKS. Directory mode never requires LUKS.
+`--swap` only records a storage plan (default off). It does not create a
+disk swap device. zram swap is the boot service `voidling-zram` and does
+not follow this flag.
+
+`--luks` records a plan in directory mode. Disk apply
+(`--i-understand-this-wipes-disks`) formats the root partition as LUKS2
+when `--luks-passphrase-file` points at a non-empty file, opens it as
+`voidling-root`, and writes `etc/crypttab` plus `rd.luks.uuid=` on the
+boot entry. The OSTree initrd includes the `crypt` dracut module.
 
 Also stubbed: ARM, a production TUI, and actually applying swap/LUKS.
 

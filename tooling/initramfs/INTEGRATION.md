@@ -22,7 +22,7 @@ Plasma tree.
 BLS `options` only need:
 
 ```
-root=UUID=<root> rw ostree=/ostree/boot.N/voidling/<bootcsum>/<serial>
+root=UUID=<root> rw ostree=/ostree/boot.N/voidling/<bootcsum>/<serial> zswap.enabled=0
 ```
 
 `init=/…/ostree-prepare-root` is optional and redundant when this module is in
@@ -30,7 +30,7 @@ the initramfs. Do **not** add `systemd.*` kargs.
 
 ## Image / ISO
 
-`build-iso.sh` already copies `/boot/initramfs-*.img` when present; do not edit it.
+`build-iso.sh` packs `out/initramfs-$ARCH-$LIBC-$VARIANT-live.img` from `install-live-dracut.sh`. It does not pack this module's `/boot/initramfs-*.img`. Do not point the ISO at the OSTree initrd.
 
 ## Out of scope
 

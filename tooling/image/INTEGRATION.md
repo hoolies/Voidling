@@ -62,7 +62,7 @@ The compose initramfs (`voidling-ostree` / BOOTABLE dracut) may omit `ext4` and 
 It then writes a **single** static menu entry in `/boot/grub/grub.cfg`:
 
 - `search --fs-uuid` for the ext4 root UUID
-- `linux /<kernel-path> root=UUID=<root> rw console=tty0 console=ttyS0`
+- `linux /<kernel-path> root=UUID=<root> rw zswap.enabled=0 console=tty0 console=ttyS0`
   (`/<kernel-path>` is `/boot/<vmlinuz>` or `/usr/lib/modules/<kver>/vmlinuz`)
 - `initrd /<initrd-path>` when an initramfs was detected
 
@@ -102,7 +102,7 @@ bash tooling/image/boot-qemu.sh --iso --variant=minimal
 | `/README.voidling.txt` | Same notes, shipped inside the ISO |
 | Volume label | `VOIDLING` (override with `--label` / `ISO_LABEL`) |
 
-Live kargs: `rd.live.image rd.overlay rd.live.dir=live rd.live.squashimg=filesystem.squashfs root=live:CDLABEL=VOIDLING console=tty0 console=ttyS0 rw`
+Live kargs: `rd.live.image rd.overlay rd.live.dir=live rd.live.squashimg=filesystem.squashfs root=live:CDLABEL=VOIDLING console=tty0 console=ttyS0 zswap.enabled=0 rw`
 
 A sealed compose tree has `/usr/etc` and no `/etc`. `build-iso.sh` restores `/etc` from `/usr/etc` into the squashfs only, then deletes that temporary `/etc`.
 
@@ -111,7 +111,7 @@ A sealed compose tree has `/usr/etc` and no `/etc`. `build-iso.sh` restores `/et
 - Prefer `/live/filesystem.squashfs` as the payload to unpack or loop-mount.
 - Live session: `sudo voidling-installer` (menu) or `sudo install-voidling` (flags), shipped inside the squashfs at `/usr/lib/voidling`.
 - If squashfs is absent (`--no-squashfs` or missing `mksquashfs`), fall back to the composed directory `out/rootfs-x86_64-glibc-minimal/` or `…-plasma/` on the build/install host.
-- Live boot needs an initrd that contains **dmsquash-live** and **omits** `voidling-ostree`. After compose, run `tooling/image/install-live-dracut.sh`. Do not bake live modules into the default OSTree/qcow2 initrd.
+- Live boot needs an initrd that contains **dmsquash-live** and **omits** `voidling-ostree`. After compose, run `tooling/image/install-live-dracut.sh`. That writes `out/initramfs-$ARCH-$LIBC-$VARIANT-live.img` and does not modify the rootfs. Do not bake live modules into the default OSTree/qcow2 initrd.
 - The installer owns partitioning, ESP creation, and **ZFS vs Btrfs**. Do not reuse the qcow2 ext4 recipe on real hardware.
 
 ## OSTree deploy agent
@@ -136,9 +136,9 @@ sudo bash tooling/image/build-iso.sh --variant=minimal --squashfs
 bash tooling/image/boot-qemu.sh --iso --variant=minimal
 ```
 
-1. `install-live-dracut.sh` copies `overlays/live/etc/dracut.conf.d/50-voidling-live.conf` (or `tooling/image/live-dracut.conf`) into `/usr/etc` (and `/etc` if present) and rebuilds with `hostonly=no`, `--omit voidling-ostree`.
+1. `install-live-dracut.sh` reads `overlays/live/etc/dracut.conf.d/50-voidling-live.conf` (or `tooling/image/live-dracut.conf`) via a temporary `--confdir`. It does not copy that file into `/usr/etc` or `/etc`.
 2. Module list (keep it in those two files, not here): `dmsquash-live overlayfs pollcdrom`, `omit voidling-ostree`, plus iso9660/squashfs/overlay/CD/virtio drivers.
-3. Rebuild: `dracut --force --no-hostonly --omit voidling-ostree /boot/initramfs-<kver>.img <kver>`.
+3. Output: `out/initramfs-<arch>-<libc>-<variant>-live.img`. The tree's `/boot/initramfs-<kver>.img` remains the OSTree initrd. `build-iso.sh` packs the side file as `/boot/initrd`.
 
 `dmsquash-live` refuses to install when `hostonly` is set. `device-mapper` (`dmsetup`) is pulled by `dracut` → `kpartx` on Void; do not drop that chain from a custom `PKGS` list.
 

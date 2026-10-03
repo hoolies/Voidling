@@ -361,6 +361,40 @@ discover_if_possible() {
     _vbl_discover "$SYSROOT" "$OSNAME" "$gen_root_karg" "$EXTRA_KARGS"
 }
 
+inherit_extra_kargs() {
+    local tok kargs_file inherited=""
+    # Prefer persisted install kargs so LUKS/console survive upgrades.
+    for kargs_file in \
+        "$SYSROOT/etc/voidling/kargs" \
+        /etc/voidling/kargs; do
+        if [[ -f "$kargs_file" ]]; then
+            inherited="$(tr '\n' ' ' <"$kargs_file" | sed 's/[[:space:]]*$//')"
+            break
+        fi
+    done
+    if [[ -z "$inherited" && "$_vbl_dep_count" -gt 0 ]]; then
+        for tok in ${_vbl_dep_options[0]}; do
+            case "$tok" in
+                root=* | ostree=* | BOOT_IMAGE=*) ;;
+                *)
+                    if [[ -n "$inherited" ]]; then
+                        inherited="$inherited $tok"
+                    else
+                        inherited="$tok"
+                    fi
+                    ;;
+            esac
+        done
+    fi
+    if [[ -z "${EXTRA_KARGS:-}" && -n "$inherited" ]]; then
+        EXTRA_KARGS="$inherited"
+        log "inherited EXTRA_KARGS: $EXTRA_KARGS"
+    elif [[ -z "${EXTRA_KARGS:-}" ]]; then
+        EXTRA_KARGS="rw zswap.enabled=0 modprobe.blacklist=zswap"
+        log "EXTRA_KARGS defaulted (no prior kargs found): $EXTRA_KARGS"
+    fi
+}
+
 inherit_from_current() {
     local tok
 
@@ -378,6 +412,7 @@ inherit_from_current() {
         fi
     fi
     ROOT_KARG="${ROOT_KARG:-root=UUID=VOIDLING-ROOT}"
+    inherit_extra_kargs
 
     if [[ "$REF_SET" -eq 1 ]]; then
         VARIANT="${VARIANT:-${OSTREE_REF##*/}}"
@@ -564,7 +599,7 @@ do_deploy() {
         SYSROOT_DIR="$SYSROOT" \
         SYSROOT="$SYSROOT" \
         ROOT_KARG="$deploy_karg" \
-        EXTRA_KARGS="${EXTRA_KARGS:-rw}" \
+        EXTRA_KARGS="${EXTRA_KARGS:-rw zswap.enabled=0 modprobe.blacklist=zswap}" \
         RETAIN="$RETAIN" \
         OSTREE_BOOTLOADER=none \
         bash -- "$script" --sysroot="$SYSROOT" --osname="$OSNAME" --ref="$OSTREE_REF" \
@@ -587,7 +622,7 @@ do_deploy() {
 
 regenerate_menu() {
     local -a cmd
-    local root_karg
+    local root_karg uuid
 
     if [[ "$NO_GENERATE" -eq 1 ]]; then
         log "boot menu regenerate skipped (--no-generate)"
@@ -601,6 +636,24 @@ regenerate_menu() {
     fi
     if [[ -n "$EXTRA_KARGS" ]]; then
         cmd+=(--extra-kargs="$EXTRA_KARGS")
+    fi
+    case "${FILESYSTEM:-}" in
+        btrfs)
+            cmd+=(--root-subvol=@)
+            ;;
+        "")
+            if findmnt -n -o FSTYPE -- "$SYSROOT" 2>/dev/null | grep -qx btrfs; then
+                cmd+=(--root-subvol=@)
+            fi
+            ;;
+    esac
+    if [[ -n "${ROOT_FS_UUID:-}" ]]; then
+        cmd+=(--root-fs-uuid="$ROOT_FS_UUID")
+    elif [[ " ${cmd[*]} " == *" --root-subvol=@ "* ]]; then
+        uuid="$(findmnt -n -o UUID -- "$SYSROOT" 2>/dev/null || true)"
+        if [[ -n "$uuid" ]]; then
+            cmd+=(--root-fs-uuid="$uuid")
+        fi
     fi
 
     if [[ "$APPLY" -eq 0 ]]; then

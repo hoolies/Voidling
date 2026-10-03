@@ -35,4 +35,5 @@ Your project needs an explicit decision: **how** you produce and update an immut
 - Steam in the Fenestration image.
 - Live `xbps-install` / `xbps-remove` on the booted host.
 - ARM images (until taken off the back burner).
-- Disk `mkfs` in the installer prototype (plan-only until explicitly enabled).
+
+Disk `mkfs` runs only for `TARGET=disk` with `--i-understand-this-wipes-disks`. Directory mode never formats a disk.

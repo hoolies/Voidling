@@ -122,7 +122,7 @@ fall back to the commit checksum (fixture / testdata).
 `deploy-sysroot.sh` already wrote. Typical shape (from that agent):
 
 ```
-root=UUID=<root-uuid> rw ostree=/ostree/boot.N/voidling/<bootcsum>/<serial>
+root=UUID=<root-uuid> rw ostree=/ostree/boot.N/voidling/<bootcsum>/<serial> zswap.enabled=0
 ```
 
 They may also include:
@@ -138,7 +138,7 @@ when it is already in BLS. We never emit `systemd.*` kargs.
 When synthesizing (no BLS yet, e.g. `testdata/`):
 
 ```
-root=UUID=VOIDLING-ROOT rw ostree=/ostree/boot.N/voidling/<checksum-or-bootcsum>/<serial>
+root=UUID=VOIDLING-ROOT rw ostree=/ostree/boot.N/voidling/<checksum-or-bootcsum>/<serial> zswap.enabled=0
 ```
 
 | Token | Meaning |
@@ -149,12 +149,12 @@ root=UUID=VOIDLING-ROOT rw ostree=/ostree/boot.N/voidling/<checksum-or-bootcsum>
 
 Optional extras via `--extra-kargs`.
 
-### Initramfs gap (not implemented here)
+### Initramfs
 
-Fedora’s dracut ostree module + `ostree-prepare-root` interpret `ostree=` and
-switch-root into the deployment. Void `dracut` in the bootable seed may **not**
-include that module. Someone (image / ostree-deploy / a future initramfs hook)
-must install an equivalent. We only **emit** the karg.
+`tooling/initramfs/install-ostree-initramfs.sh` installs `98voidling-ostree`
+and rebuilds `/boot/initramfs-<kver>.img` during `BOOTABLE=1` compose. That
+module honors `ostree=` and switch-roots into the deployment, then execs
+runit. This directory only emits the karg. Do not add a second ostree hook.
 
 ## How we discover deployments
 

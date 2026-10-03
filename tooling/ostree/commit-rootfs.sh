@@ -86,15 +86,45 @@ ensure_repo() {
 
 rootfs_has_kernel() {
     local path
+    shopt -s nullglob
     for path in \
         "$ROOTFS_DIR"/usr/lib/modules/*/vmlinuz \
         "$ROOTFS_DIR"/usr/lib/ostree-boot/vmlinuz \
-        "$ROOTFS_DIR"/boot/vmlinuz; do
+        "$ROOTFS_DIR"/boot/vmlinuz \
+        "$ROOTFS_DIR"/boot/vmlinuz-*; do
         if [[ -e "$path" || -L "$path" ]]; then
+            shopt -u nullglob
             return 0
         fi
     done
+    shopt -u nullglob
     return 1
+}
+
+link_void_kernels() {
+    local kdir kver dest src
+    shopt -s nullglob
+    for kdir in "$ROOTFS_DIR"/usr/lib/modules/*; do
+        [[ -d "$kdir" ]] || continue
+        kver="$(basename -- "$kdir")"
+        dest="$kdir/vmlinuz"
+        src="$ROOTFS_DIR/boot/vmlinuz-$kver"
+        if [[ -e "$dest" && ! -L "$dest" ]]; then
+            continue
+        fi
+        if [[ -e "$src" ]]; then
+            # Absolute symlinks break GRUB (ostree copies them into /boot/ostree/).
+            # Prefer a hard link; fall back to a regular file copy.
+            rm -f -- "$dest"
+            if ln -- "$src" "$dest" 2>/dev/null; then
+                log "    hardlinked $dest <- boot/vmlinuz-$kver"
+            else
+                cp -a -- "$src" "$dest"
+                log "    copied $dest <- boot/vmlinuz-$kver"
+            fi
+        fi
+    done
+    shopt -u nullglob
 }
 
 want_bootable_commit() {
@@ -114,9 +144,42 @@ want_bootable_commit() {
     esac
 }
 
+maybe_sign_args() {
+    local secret keys_dir
+    # Default off until keys are a full 64-byte ed25519 secret (hex). Opt in
+    # with OSTREE_SIGN=1 after tooling/ostree/ensure-signing-keys.sh.
+    case "${OSTREE_SIGN:-0}" in
+        0 | no | false | NO | FALSE | '')
+            return 0
+            ;;
+    esac
+    keys_dir="${OSTREE_KEYS_DIR:-$OUT_DIR/ostree-keys}"
+    secret="$keys_dir/ed25519.secret"
+    if [[ ! -f "$secret" ]]; then
+        if [[ -x "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" ]]; then
+            bash -- "$ROOT_DIR/tooling/ostree/ensure-signing-keys.sh" >/dev/null || true
+        fi
+    fi
+    if [[ -f "$secret" ]]; then
+        local hex
+        hex="$(tr -d '[:space:]' <"$secret")"
+        # libostree expects 64-byte secret as 128 hex chars.
+        if [[ "${#hex}" -ne 128 ]]; then
+            log "    signing: skipped (ed25519.secret must be 128 hex chars, got ${#hex})"
+            return 0
+        fi
+        if ostree --repo="$OSTREE_REPO_DIR" commit --help 2>&1 | grep -q sign-type; then
+            printf '%s\n' "--sign-type=ed25519" "--sign=$hex"
+            log "    signing: ed25519 ($secret)"
+            return 0
+        fi
+    fi
+    log "    signing: skipped (set OSTREE_SIGN=1 and keys under $keys_dir)"
+}
+
 commit_rootfs() {
     local commit_hash
-    local -a commit_args
+    local -a commit_args sign_args
     commit_args=(
         --repo="$OSTREE_REPO_DIR"
         commit
@@ -126,12 +189,42 @@ commit_rootfs() {
         --add-metadata-string=version="$VERSION"
     )
     if want_bootable_commit; then
+        link_void_kernels
         commit_args+=(--bootable)
         log "    bootable: yes"
     else
         log "    bootable: no"
     fi
-    commit_hash="$(ostree "${commit_args[@]}")"
+    mapfile -t sign_args < <(maybe_sign_args || true)
+    if [[ "${#sign_args[@]}" -gt 0 ]]; then
+        commit_args+=("${sign_args[@]}")
+    fi
+    local err
+    err="$(mktemp -- "${TMPDIR:-/tmp}/voidling-ostree-commit.XXXXXX")"
+    if ! commit_hash="$(ostree "${commit_args[@]}" 2>"$err")"; then
+        if [[ "${#sign_args[@]}" -gt 0 ]]; then
+            log "warning: signed commit failed; retrying without signature"
+            cat -- "$err" >&2 || true
+            commit_args=(
+                --repo="$OSTREE_REPO_DIR"
+                commit
+                --branch="$OSTREE_REF"
+                --tree=dir="$ROOTFS_DIR"
+                --subject="$SUBJECT"
+                --add-metadata-string=version="$VERSION"
+            )
+            if want_bootable_commit; then
+                commit_args+=(--bootable)
+            fi
+            commit_hash="$(ostree "${commit_args[@]}")"
+        else
+            cat -- "$err" >&2 || true
+            rm -f -- "$err"
+            die "ostree commit failed"
+        fi
+    fi
+    rm -f -- "$err"
+    [[ -n "$commit_hash" ]] || die "ostree commit produced no hash"
     printf '%s\n' "$commit_hash"
 }
 

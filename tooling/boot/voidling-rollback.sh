@@ -231,9 +231,28 @@ write_stub_default() {
 
 regenerate_menu() {
     local -a cmd
+    local uuid
     cmd=("${BOOT_DIR}/generate-boot-menu.sh" --sysroot="$SYSROOT" --osname="$OSNAME")
     if [[ -n "$OUTPUT_DIR" ]]; then
         cmd+=(--output-dir="$OUTPUT_DIR")
+    fi
+    case "${FILESYSTEM:-}" in
+        btrfs)
+            cmd+=(--root-subvol=@)
+            ;;
+        "")
+            if findmnt -n -o FSTYPE -- "$SYSROOT" 2>/dev/null | grep -qx btrfs; then
+                cmd+=(--root-subvol=@)
+            fi
+            ;;
+    esac
+    if [[ -n "${ROOT_FS_UUID:-}" ]]; then
+        cmd+=(--root-fs-uuid="$ROOT_FS_UUID")
+    elif [[ " ${cmd[*]} " == *" --root-subvol=@ "* ]]; then
+        uuid="$(findmnt -n -o UUID -- "$SYSROOT" 2>/dev/null || true)"
+        if [[ -n "$uuid" ]]; then
+            cmd+=(--root-fs-uuid="$uuid")
+        fi
     fi
     "${cmd[@]}"
 }

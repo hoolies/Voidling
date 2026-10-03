@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# One-shot: zram swap and ZFS ARC cap, then pause so runit keeps the service up.
+set -eu
+unalias -a 2>/dev/null || true
+
+/usr/lib/voidling/setup-zram.sh
+exec pause

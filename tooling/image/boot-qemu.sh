@@ -39,6 +39,8 @@ NOGRAPHIC=0
 FIRMWARE_MODE=""
 VARS_COPY=""
 IMAGE_FORMAT="qcow2"
+DISK_PATH=""
+DISK_FORMAT="qcow2"
 BOOT_MEDIA="disk"
 QEMU_ARGS=()
 
@@ -55,6 +57,8 @@ Mandatory arguments to long options are mandatory for short options too.
       --iso             boot the default live ISO instead of the qcow2
       --iso=FILE        boot FILE as a CD-ROM (implies --iso)
       --cdrom FILE      same as --iso=FILE
+      --disk FILE       attach FILE as a virtio disk (qcow2/raw; with --iso
+                        this is the install target, bootindex=1)
   -m, --memory SIZE     guest RAM (default: 2048 minimal, 4096 plasma)
   -c, --cpus N          virtual CPUs (default: 2)
       --ovmf-code FILE  OVMF/EDK2 code firmware
@@ -153,6 +157,16 @@ parse_args() {
                 BOOT_MEDIA="iso"
                 ISO_PATH="${1#--cdrom=}"
                 [[ -n "$ISO_PATH" ]] || usage_error "option requires an argument -- 'cdrom'"
+                shift
+                ;;
+            --disk)
+                require_arg "$@"
+                DISK_PATH="$2"
+                shift 2
+                ;;
+            --disk=*)
+                DISK_PATH="${1#--disk=}"
+                [[ -n "$DISK_PATH" ]] || usage_error "option requires an argument -- 'disk'"
                 shift
                 ;;
             -m | --memory)
@@ -291,7 +305,22 @@ validate_inputs() {
             die "ISO not found: $ISO_PATH (build with tooling/image/build-iso.sh --variant=$VARIANT)"
         fi
         ISO_PATH="$(absolutize_existing "$ISO_PATH")"
+        if [[ -n "$DISK_PATH" ]]; then
+            [[ -f "$DISK_PATH" ]] || die "disk image not found: $DISK_PATH"
+            DISK_PATH="$(absolutize_existing "$DISK_PATH")"
+            case "$DISK_PATH" in
+                *.raw)
+                    DISK_FORMAT="raw"
+                    ;;
+                *)
+                    DISK_FORMAT="qcow2"
+                    ;;
+            esac
+        fi
         return 0
+    fi
+    if [[ -n "$DISK_PATH" ]]; then
+        die "--disk is only valid with --iso (second-disk live install)"
     fi
     if [[ ! -f "$IMAGE_PATH" ]]; then
         die "image not found: $IMAGE_PATH (build with tooling/image/build-vm-uefi-qcow2.sh --variant=$VARIANT)"
@@ -442,6 +471,10 @@ build_qemu_args() {
         QEMU_ARGS+=(-drive "if=none,id=cd,media=cdrom,readonly=on,file=${ISO_PATH}")
         QEMU_ARGS+=(-device "virtio-scsi-pci,id=scsi0")
         QEMU_ARGS+=(-device "scsi-cd,drive=cd,bootindex=0")
+        if [[ -n "$DISK_PATH" ]]; then
+            QEMU_ARGS+=(-drive "if=none,id=installdisk,file=${DISK_PATH},format=${DISK_FORMAT}")
+            QEMU_ARGS+=(-device "virtio-blk-pci,drive=installdisk,bootindex=1")
+        fi
     else
         QEMU_ARGS+=(-drive "if=virtio,file=${IMAGE_PATH},format=${IMAGE_FORMAT}")
     fi
@@ -463,6 +496,9 @@ run_qemu() {
     if [[ "$BOOT_MEDIA" == "iso" ]]; then
         log "==> booting Voidling live ISO"
         log "    iso:      $ISO_PATH"
+        if [[ -n "$DISK_PATH" ]]; then
+            log "    disk:     $DISK_PATH ($DISK_FORMAT)"
+        fi
     else
         log "==> booting Voidling qcow2"
         log "    image:    $IMAGE_PATH"

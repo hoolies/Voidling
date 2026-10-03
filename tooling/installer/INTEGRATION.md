@@ -248,7 +248,7 @@ Installer invocations pass environment only (`SYSROOT`, `VARIANT`, `SWAP`,
 `--swap` and `--luks` are **plan-only** in directory mode (and still plan-only
 on disk apply today). They write `plan.env` / `etc/voidling/storage-plan.env`.
 They do not run `mkswap`, `cryptsetup`, or `mkfs`. Directory mode must not
-require LUKS.
+require LUKS. zram swap is `voidling-zram` and ignores `SWAP`.
 
 Details: `tooling/firstboot/INTEGRATION.md`.
 
