@@ -45,6 +45,7 @@ readonly -a OVMF_SECURE_CODE_CANDIDATES=(
 )
 
 SECURE_BOOT="${SECURE_BOOT:-0}"
+WITH_TPM="${WITH_TPM:-0}"
 WORK_DIR=""
 USE_KVM=0
 NO_KVM=0
@@ -56,6 +57,10 @@ DISK_PATH=""
 DISK_FORMAT="qcow2"
 BOOT_MEDIA="disk"
 QEMU_ARGS=()
+SWTPM_PID=""
+TPM_STATE_DIR=""
+TPM_SOCK=""
+TPM_CTRL=""
 
 usage() {
     cat <<EOF
@@ -83,6 +88,8 @@ Mandatory arguments to long options are mandatory for short options too.
                         with --ovmf-vars pointing at a vars image that has the
                         Voidling certificate enrolled (see
                         tooling/image/test-secureboot-iso.sh)
+      --tpm             attach a software TPM2 (swtpm) as tpm-tis
+      --tpm-state DIR   reuse/persist swtpm state at DIR (implies --tpm)
   -h, --help            display this help and exit
 
 OVMF is detected from Void, Debian/Ubuntu, and Fedora paths when
@@ -102,6 +109,8 @@ Environment:
   QEMU_MEMORY    guest RAM
   QEMU_CPUS      virtual CPUs
   SECURE_BOOT    1 = same as --secure-boot
+  WITH_TPM       1 = same as --tpm
+  TPM_STATE_DIR  swtpm state directory (default: temp under OUT_DIR/tmp)
   OUT_DIR        output directory (default: <repo>/out)
   TARGET_ARCH    architecture (default: x86_64)
 EOF
@@ -247,6 +256,22 @@ parse_args() {
                 ;;
             --secure-boot)
                 SECURE_BOOT=1
+                shift
+                ;;
+            --tpm)
+                WITH_TPM=1
+                shift
+                ;;
+            --tpm-state)
+                require_arg "$@"
+                TPM_STATE_DIR="$2"
+                WITH_TPM=1
+                shift 2
+                ;;
+            --tpm-state=*)
+                TPM_STATE_DIR="${1#--tpm-state=}"
+                [[ -n "$TPM_STATE_DIR" ]] || usage_error "option requires an argument -- 'tpm-state'"
+                WITH_TPM=1
                 shift
                 ;;
             --)
@@ -481,10 +506,58 @@ resolve_kvm() {
 }
 
 cleanup() {
+    if [[ -n "${SWTPM_PID:-}" ]] && kill -0 "$SWTPM_PID" 2>/dev/null; then
+        kill "$SWTPM_PID" 2>/dev/null || true
+        wait "$SWTPM_PID" 2>/dev/null || true
+    fi
+    SWTPM_PID=""
     if [[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]]; then
         rm -rf -- "$WORK_DIR"
         WORK_DIR=""
     fi
+}
+
+start_swtpm() {
+    local out_dir setup_state
+    if [[ "$WITH_TPM" != "1" ]]; then
+        return 0
+    fi
+    need swtpm
+    out_dir="${OUT_DIR:-$ROOT_DIR/out}"
+    mkdir -p -- "${out_dir}/tmp"
+    if [[ -z "${TPM_STATE_DIR:-}" ]]; then
+        TPM_STATE_DIR="$(mktemp -d -- "${out_dir}/tmp/voidling-swtpm.XXXXXX")"
+    else
+        mkdir -p -- "$TPM_STATE_DIR"
+    fi
+    TPM_SOCK="$TPM_STATE_DIR/swtpm-sock"
+    TPM_CTRL="$TPM_STATE_DIR/swtpm-ctrl"
+    rm -f -- "$TPM_SOCK" "$TPM_CTRL"
+    setup_state="$TPM_STATE_DIR/tpm2-00.permall"
+    if [[ ! -e "$setup_state" ]]; then
+        if command -v swtpm_setup >/dev/null 2>&1; then
+            swtpm_setup --tpm2 --tpmstate "$TPM_STATE_DIR" --create-ek-cert \
+                --create-platform-cert --lock-nvram >/dev/null 2>&1 ||
+                swtpm_setup --tpm2 --tpmstate "$TPM_STATE_DIR" --not-overwrite >/dev/null
+        fi
+    fi
+    log "==> starting swtpm (state: $TPM_STATE_DIR)"
+    swtpm socket --tpm2 \
+        --tpmstate "dir=$TPM_STATE_DIR" \
+        --ctrl "type=unixio,path=$TPM_CTRL" \
+        --server "type=unixio,path=$TPM_SOCK" \
+        --flags not-need-init,startup-clear \
+        --daemon --pid "file=$TPM_STATE_DIR/swtpm.pid"
+    if [[ -f "$TPM_STATE_DIR/swtpm.pid" ]]; then
+        SWTPM_PID="$(cat -- "$TPM_STATE_DIR/swtpm.pid")"
+    fi
+    # Give the socket a moment to appear.
+    local i=0
+    while [[ "$i" -lt 50 && ! -S "$TPM_SOCK" ]]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    [[ -S "$TPM_SOCK" ]] || die "swtpm socket did not appear: $TPM_SOCK"
 }
 
 prepare_vars_copy() {
@@ -530,6 +603,11 @@ build_qemu_args() {
     else
         QEMU_ARGS+=(-drive "if=virtio,file=${IMAGE_PATH},format=${IMAGE_FORMAT}")
     fi
+    if [[ "$WITH_TPM" == "1" ]]; then
+        QEMU_ARGS+=(-chardev "socket,id=chrtpm,path=${TPM_SOCK}")
+        QEMU_ARGS+=(-tpmdev "emulator,id=tpm0,chardev=chrtpm")
+        QEMU_ARGS+=(-device "tpm-tis,tpmdev=tpm0")
+    fi
     if [[ "$NOGRAPHIC" == "1" ]]; then
         QEMU_ARGS+=(-nographic)
     fi
@@ -568,6 +646,9 @@ run_qemu() {
     if [[ "$SECURE_BOOT" == "1" ]]; then
         log "    secure:   on (SMM; enforcement depends on the vars image)"
     fi
+    if [[ "$WITH_TPM" == "1" ]]; then
+        log "    tpm:      swtpm ($TPM_STATE_DIR)"
+    fi
     log_qemu_cmd
     # Foreground: a background qemu in a script has stdin redirected to
     # /dev/null (bash, no job control), so serial passphrases never arrive.
@@ -583,6 +664,9 @@ main() {
     resolve_firmware
     resolve_kvm
     prepare_vars_copy
+    # Ensure cleanup covers swtpm even when prepare_vars_copy did not set a trap.
+    trap cleanup EXIT
+    start_swtpm
     build_qemu_args
     run_qemu
 }

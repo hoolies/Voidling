@@ -47,10 +47,11 @@ Shared environment on every helper invocation:
 | `APPLY_DISK` | `0` or `1` | Disk partition/mkfs/apply is armed |
 | `DRY_RUN` | `0` or `1` | Plan only |
 | `BOOT_ALLOW_EXTRA_ENTRIES` | `1` | Leave room for rollback entries |
-| `BOOTLOADER` | `grub` | `grub` or later `uki` |
+| `BOOTLOADER` | `grub` | GRUB only (locked) |
 | `BOOTLOADER_ID` | `Voidling` | EFI bootloader id |
 | `SWAP` | `0` or `1` | Optional swap **plan** (default off; not created) |
-| `LUKS` | `0` or `1` | Optional LUKS **plan** (default off; not created) |
+| `LUKS` | `0` or `1` | Dir: plan only. Disk apply: LUKS2 when passphrase file set |
+| `LUKS_TPM2` | `0` or `1` | Disk apply: clevis TPM2 bind after LUKS open |
 | `VOIDLING_HOSTNAME` | `voidling` | First-boot hostname (do not use `HOSTNAME`) |
 | `VOIDLING_USER` | `voidling` | First-boot login name |
 
@@ -111,7 +112,8 @@ Exit 0 on success, 1 on runtime failure, 2 on usage error.
 - `tooling/snapshots/` scripts other than `prepare-install-layout.sh` (dir)
   and `create-btrfs-layout.sh` / `create-zfs-layout.sh` (disk apply)
 
-Optional later hook (not invoked today): `tooling/snapshots/create-baseline-snapshot.sh`
+Post-install hook: `tooling/snapshots/create-baseline-snapshot.sh` (pinned
+`baseline` /var snapshot after firstboot on disk apply).
 with the same env, after a successful deploy.
 
 ---
@@ -168,23 +170,23 @@ not the rollback menu itself.
 
 ```
 Usage: install-bootloader.sh [OPTION]...
-Install GRUB or UKI into the ESP for an OSTree sysroot.
+Install GRUB into the ESP for an OSTree sysroot.
 
   -h, --help            display this help and exit
 ```
 
-Environment: `SYSROOT`, `ESP_DIR`, `BOOTLOADER` (`grub` default, `uki` later),
+Environment: `SYSROOT`, `ESP_DIR`, `BOOTLOADER=grub`,
 `BOOTLOADER_ID` (`Voidling`), `BOOT_ALLOW_EXTRA_ENTRIES=1`, `TARGET_ARCH`,
 `DRY_RUN`, `ROOT_KARG`.
 
 ### Expected semantics
 
-- UEFI first (`x86_64-efi`).
+- UEFI first (`x86_64-efi`), GRUB only (`docs/uki-decision.md`).
 - Install into `ESP_DIR` (mounted at `/boot/efi` on a real disk).
 - Keep a stable include/drop-in so extra entries can appear later without
   rewriting the installer, for example:
-  - GRUB: `SYSROOT/boot/grub/custom.cfg` and/or `grub.d/` drop-ins
-  - UKI/bls: `SYSROOT/boot/loader/entries/` (already created by the installer)
+  - GRUB drop-in under `SYSROOT/etc/grub.d/` / `boot/grub/`
+  - BLS under `SYSROOT/boot/loader/entries/`
 - Do **not** require the rollback generator to exist at install time.
 - Suggested later hook (not invoked today):
   `tooling/boot/add-rollback-entries.sh` with `SYSROOT`, `ESP_DIR`,
@@ -216,11 +218,12 @@ Disk apply (`TARGET=disk` + `--i-understand-this-wipes-disks`, not `--dry-run`):
 
 1. GPT via `sfdisk` (ESP 512 MiB EF00, remainder Linux)
 2. `mkfs.vfat -F 32` on the ESP
-3. `create-btrfs-layout.sh --apply` or `create-zfs-layout.sh --apply`
-4. Mount `@` or `rpool/ROOT` at `SYSROOT`, ESP at `ESP_DIR`
-5. `deploy-sysroot.sh`
-6. `install-bootloader.sh`
-7. `configure-system.sh` (same as dir; `--swap` / `--luks` remain plan-only)
+3. Optional LUKS2 format/open (`--luks-passphrase-file`); optional `--luks-tpm2`
+4. `create-btrfs-layout.sh --apply` or `create-zfs-layout.sh --apply`
+5. Mount `@` or `rpool/ROOT` at `SYSROOT`, ESP at `ESP_DIR`
+6. `deploy-sysroot.sh` + crypttab / `@home` fstab / persistent kargs
+7. `install-bootloader.sh` (signs ESP when `SECURE_BOOT=1` and keys exist)
+8. `configure-system.sh` (`--swap` remains plan-only; LUKS already applied)
 
 ---
 
@@ -245,10 +248,11 @@ Configure hostname, a wheel/sudo user, locale, and NetworkManager in a SYSROOT.
 Installer invocations pass environment only (`SYSROOT`, `VARIANT`, `SWAP`,
 `LUKS`, `DRY_RUN`, `VOIDLING_HOSTNAME`, `VOIDLING_USER`).
 
-`--swap` and `--luks` are **plan-only** in directory mode (and still plan-only
-on disk apply today). They write `plan.env` / `etc/voidling/storage-plan.env`.
-They do not run `mkswap`, `cryptsetup`, or `mkfs`. Directory mode must not
-require LUKS. zram swap is `voidling-zram` and ignores `SWAP`.
+`--swap` is plan-only in directory mode; on disk apply it creates
+`/var/swap/swapfile` (`SWAP_SIZE_MIB`, default 2048) plus fstab lines.
+`--luks` is plan-only in directory mode; on disk apply the installer runs
+`cryptsetup` when `--luks-passphrase-file` is set. Directory mode must not
+require LUKS. zram (`voidling-zram`) is independent of `SWAP`.
 
 Details: `tooling/firstboot/INTEGRATION.md`.
 

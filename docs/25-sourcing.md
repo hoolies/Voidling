@@ -38,8 +38,9 @@ Flow:
 1. Snapshot type `pre-sourcing-into-generation` (system `/var` only).
 2. `xbps-src` produces `.xbps` under `out/cache/void-packages/hostdir/binpkgs`.
 3. `out/sourcing/generation/extra-pkgs` lists the names.
-4. Compose splices those names into `PKGS` and should `-R` the local binpkgs
-   repo (hook not auto-wired yet; see `tooling/sourcing/INTEGRATION.md`).
+4. Compose splices those names into `PKGS` and `-R`s the local binpkgs
+   repo when present (see `tooling/compose/compose-rootfs.sh` and
+   `tooling/sourcing/INTEGRATION.md`).
 5. OSTree commit + reboot into the new deployment. Rollback is a previous
    deployment, not `xbps-remove`.
 

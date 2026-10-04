@@ -23,6 +23,10 @@ Mandatory arguments to long options are mandatory for short options too.
 Layout:
   /usr/lib/voidling/tooling/{boot,ostree,snapshots,firstboot}/...
   /usr/bin/voidling-{upgrade,rollback,snapshot,set-credentials}  (wrappers)
+
+Environment:
+  SECURE_BOOT   1 = Authenticode-sign kernels in the tree (needs keys)
+  SIGN_KERNELS  auto (follow SECURE_BOOT), 1 (force), 0 (never)
 EOF
 }
 
@@ -95,10 +99,13 @@ install_tree() {
     local f
     for f in \
         voidling-upgrade.sh \
+        voidling-upgrade-ops.sh \
         voidling-rollback.sh \
         voidling-boot-lib.sh \
-        generate-boot-menu.sh \
+        voidling-boot-discover.sh \
+        voidling-secureboot-lib.sh \
         voidling-grub-esp.sh \
+        generate-boot-menu.sh \
         install-bootloader.sh \
         15_voidling; do
         [[ -f "$ROOT_DIR/tooling/boot/$f" ]] || die "missing tooling/boot/$f"
@@ -142,6 +149,26 @@ install_tree() {
         "/usr/lib/voidling/tooling/firstboot/voidling-set-credentials.sh"
     log "    installed: voidling-upgrade voidling-rollback voidling-snapshot voidling-set-credentials"
     install_ostree_trust
+    maybe_sign_kernels
+}
+
+maybe_sign_kernels() {
+    # Authenticode-sign vmlinuz when Secure Boot keys exist and SECURE_BOOT=1
+    # (or SIGN_KERNELS=1). Private keys stay on the compose host.
+    local mode="${SECURE_BOOT:-0}"
+    case "${SIGN_KERNELS:-auto}" in
+        1 | yes | true | YES | TRUE) mode=1 ;;
+        0 | no | false | NO | FALSE) return 0 ;;
+        auto | '') ;;
+        *) die "SIGN_KERNELS must be auto, 1, or 0 (got: $SIGN_KERNELS)" ;;
+    esac
+    if [[ "$mode" != "1" ]]; then
+        return 0
+    fi
+    # shellcheck source=../boot/voidling-secureboot-lib.sh
+    . "$ROOT_DIR/tooling/boot/voidling-secureboot-lib.sh"
+    vsb_prepare "$ROOT_DIR" 1
+    vsb_sign_kernels_in_tree "$ROOTFS_DIR" "$SB_KEYS_DIR"
 }
 
 install_ostree_trust() {

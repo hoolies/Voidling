@@ -15,13 +15,14 @@ readonly ROOT_DIR
 readonly DROPIN_SRC="${BOOT_DIR}/15_voidling"
 
 # shellcheck source=voidling-grub-esp.sh
-# shellcheck source=voidling-grub-esp.sh
 . "${BOOT_DIR}/voidling-grub-esp.sh"
+# shellcheck source=voidling-secureboot-lib.sh
+. "${BOOT_DIR}/voidling-secureboot-lib.sh"
 
 usage() {
     cat <<EOF
 Usage: $PROGNAME [OPTION]...
-Install GRUB or UKI into the ESP for an OSTree sysroot.
+Install GRUB into the ESP for an OSTree sysroot (BLS menu + rollback).
 
 Mandatory arguments to long options are mandatory for short options too.
 
@@ -31,7 +32,7 @@ Mandatory arguments to long options are mandatory for short options too.
 Environment:
   SYSROOT                   OSTree sysroot
   ESP_DIR                   ESP mount (default: SYSROOT/boot/efi)
-  BOOTLOADER                grub (default) or uki
+  BOOTLOADER                must be grub (locked; UKI is out of scope)
   BOOTLOADER_ID             EFI bootloader id (default: Voidling)
   BOOT_ALLOW_EXTRA_ENTRIES  1=leave room for rollback entries
   TARGET_ARCH               architecture (default: x86_64)
@@ -43,6 +44,13 @@ Environment:
   ROOT_LABEL                Btrfs/ZFS search label (default: VOIDLING_ROOT)
   ZPOOL_NAME                ZFS pool name when FILESYSTEM=zfs
   ROOT_FS_UUID              Btrfs/ext4 root filesystem UUID for ESP search
+  SECURE_BOOT               auto (default: sign when firmware SB is on or
+                            SECUREBOOT_KEYS_DIR is set), 1 (required), 0 (off)
+  SECURE_BOOT_GPG           1=embed GRUB OpenPGP pubkey + enforce signatures
+                            on installed ESP/menu (default: 1 with SB)
+  SECUREBOOT_KEYS_DIR       key directory; also auto-detected under
+                            /run/media/*/secureboot-keys (USB for bare metal)
+  OUT_DIR                   used to locate secureboot-keys when unset
 EOF
 }
 
@@ -147,15 +155,59 @@ install_grub_esp() {
         die "ZPOOL_NAME is required when FILESYSTEM=zfs"
     fi
     log "==> grub-install onto ESP"
+    prepare_secure_boot_for_esp
     vge_grub_install_efi "$ESP_DIR" "$SYSROOT" "$TARGET_ARCH" "$BOOTLOADER_ID"
     chain_path="$(vge_write_esp_chain "$ESP_DIR" "$filesystem" "$root_label" \
-        "$zpool_name" "$root_fs_uuid" "$luks_uuid")"
+        "$zpool_name" "$root_fs_uuid" "$luks_uuid" "$(gpg_enforce_flag)")"
     log "    esp chain: $chain_path"
     if [[ "$TARGET_ARCH" == "x86_64" ]]; then
         efi_path="$(vge_write_removable_efi "$ESP_DIR" "$filesystem" "$root_label" \
             "$zpool_name" "$root_fs_uuid" "$luks_uuid")"
         log "    removable: $efi_path"
     fi
+    maybe_sign_esp
+}
+
+gpg_enforce_flag() {
+    if [[ "${SECURE_BOOT:-0}" == "1" && "${SECURE_BOOT_GPG:-1}" == "1" ]]; then
+        printf '%s\n' "1"
+    else
+        printf '%s\n' "0"
+    fi
+}
+
+prepare_secure_boot_for_esp() {
+    local mode keys_dir
+    mode="$(vsb_secure_boot_mode)"
+    SECURE_BOOT="$mode"
+    export SECURE_BOOT
+    if [[ "$mode" != "1" ]]; then
+        return 0
+    fi
+    keys_dir="$(vsb_resolve_keys_dir "$ROOT_DIR")"
+    if ! vsb_keys_usable "$keys_dir"; then
+        die "Secure Boot required (firmware on or SECURE_BOOT=1) but private keys are missing.
+Mount a USB with voidling-sb.key + voidling-sb.crt as:
+  /run/media/<user>/secureboot-keys   or   /mnt/secureboot-keys
+Or set SECUREBOOT_KEYS_DIR. Private keys never ship on the live ISO.
+See tooling/boot/SECURE-BOOT.md (bare-metal installs)."
+    fi
+    SB_TOOLS="$(bash -- "$ROOT_DIR/tooling/boot/ensure-secureboot-tools.sh" 2>/dev/null || true)"
+    export SB_TOOLS
+    SB_KEYS_DIR="$keys_dir"
+    export SB_KEYS_DIR
+    SECUREBOOT_KEYS_DIR="$keys_dir"
+    export SECUREBOOT_KEYS_DIR
+    log "    secure boot keys: $keys_dir"
+}
+
+maybe_sign_esp() {
+    if [[ "${SECURE_BOOT:-0}" != "1" ]]; then
+        return 0
+    fi
+    [[ -n "${SB_KEYS_DIR:-}" ]] || die "SB_KEYS_DIR unset after prepare_secure_boot_for_esp"
+    log "==> Secure Boot: signing ESP loaders"
+    vsb_sign_esp_loaders "$ESP_DIR" "$SB_KEYS_DIR"
 }
 
 generate_menu() {
@@ -182,6 +234,9 @@ generate_menu() {
     fi
     if [[ -n "${ROOT_FS_UUID:-}" ]]; then
         cmd+=(--root-fs-uuid="${ROOT_FS_UUID}")
+    fi
+    if [[ "${SECURE_BOOT:-0}" == "1" && "${SECURE_BOOT_GPG:-1}" == "1" ]]; then
+        cmd+=(--secure-boot-gpg)
     fi
     bash -- "${cmd[@]}"
 }
@@ -212,7 +267,7 @@ main() {
     [[ -d "$SYSROOT" ]] || die "SYSROOT does not exist: $SYSROOT"
 
     case "$BOOTLOADER" in
-        grub)
+        grub | '')
             mkdir -p -- "$ESP_DIR"
             install_dropin
             write_grub_include
@@ -229,11 +284,8 @@ main() {
                 log "    note: grub-install skipped (set APPLY_DISK=1 on a mounted ESP to install EFI files)"
             fi
             ;;
-        uki)
-            die "BOOTLOADER=uki is not implemented yet"
-            ;;
         *)
-            die "BOOTLOADER must be grub or uki (got: $BOOTLOADER)"
+            die "BOOTLOADER must be grub (got: $BOOTLOADER); UKI/other loaders are out of scope — see docs/uki-decision.md"
             ;;
     esac
 }

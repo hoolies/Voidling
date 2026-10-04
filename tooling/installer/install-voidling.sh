@@ -15,6 +15,18 @@ export LC_ALL=C
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly ROOT_DIR
 
+INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly INSTALLER_DIR
+
+# shellcheck source=lib-disk-gpt.sh
+. "${INSTALLER_DIR}/lib-disk-gpt.sh"
+# shellcheck source=lib-sysroot-mount.sh
+. "${INSTALLER_DIR}/lib-sysroot-mount.sh"
+# shellcheck source=lib-luks.sh
+. "${INSTALLER_DIR}/lib-luks.sh"
+# shellcheck source=lib-swap.sh
+. "${INSTALLER_DIR}/lib-swap.sh"
+
 readonly DEFAULT_TARGET="dir"
 readonly DEFAULT_VARIANT="minimal"
 # auto: zfs when zpool+zfs are present on the installing host, else btrfs.
@@ -27,8 +39,13 @@ readonly DEFAULT_OSNAME="voidling"
 readonly DEFAULT_ZPOOL="rpool"
 readonly ESP_SIZE_MIB="512"
 readonly ESP_FSTYPE="vfat"
-readonly ESP_LABEL="VOIDLING_EFI"
+# GPT PARTLABEL (may exceed 11 chars) vs FAT volume label (max 11).
+readonly ESP_PARTLABEL="VOIDLING_EFI"
+readonly ESP_FAT_LABEL="VOIDLINGEFI"
+readonly ESP_LABEL="$ESP_PARTLABEL"
 readonly ROOT_LABEL="VOIDLING_ROOT"
+readonly DEFAULT_SWAP_SIZE_MIB="2048"
+readonly HELPER_BASELINE="tooling/snapshots/create-baseline-snapshot.sh"
 readonly STAGING_MARKER=".voidling-install-staging"
 readonly GPT_TYPE_ESP="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 readonly GPT_TYPE_LINUX="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
@@ -72,7 +89,9 @@ Mandatory arguments to long options are mandatory for short options too.
   -n, --dry-run         print planned actions; do not write or wipe
       --i-understand-this-wipes-disks
                         required for TARGET=disk; enables GPT/mkfs/apply
-      --swap            record optional swap in the install plan (default: off)
+      --swap            on disk apply: create a swapfile under /var/swap
+                        (size SWAP_SIZE_MIB, default 2048); dir mode records
+                        the plan only
       --luks            record optional LUKS (default: off). Disk apply also
                         formats the root partition when
                         --luks-passphrase-file is set
@@ -102,7 +121,7 @@ Environment (flags override these):
   DRY_RUN         1 to plan only
   SKIP_MKFS       1 to skip real mkfs (default in dir mode; forced off
                   for TARGET=disk with --i-understand-this-wipes-disks)
-  SWAP            1 to record optional swap (plan only; default off)
+  SWAP            1 to create /var/swap/swapfile on disk apply (default off)
   LUKS            1 to request LUKS (default off)
   LUKS_PASS_FILE  passphrase file used when disk apply opens LUKS
   LUKS_TPM2       1 to bind the LUKS root to TPM2 via clevis (default off)
@@ -329,8 +348,8 @@ parse_args() {
                 shift
                 ;;
             --tpm2-pcrs=*)
+                # Empty LIST disables PCR policy (QEMU/swtpm smoke).
                 TPM2_PCRS="${1#*=}"
-                [[ -n "$TPM2_PCRS" ]] || usage_error "option requires an argument -- 'tpm2-pcrs'"
                 shift
                 ;;
             --)
@@ -440,6 +459,7 @@ apply_defaults() {
     WIPE_ACK="${WIPE_ACK:-0}"
     SKIP_MKFS="${SKIP_MKFS:-1}"
     SWAP="${SWAP:-0}"
+    SWAP_SIZE_MIB="${SWAP_SIZE_MIB:-$DEFAULT_SWAP_SIZE_MIB}"
     LUKS="${LUKS:-0}"
     LUKS_PASS_FILE="${LUKS_PASS_FILE:-}"
     LUKS_TPM2="${LUKS_TPM2:-0}"
@@ -518,7 +538,9 @@ validate_config() {
         0) ;;
         1)
             [[ "$LUKS" == "1" ]] || die "LUKS_TPM2=1 requires LUKS=1"
-            [[ "$TPM2_PCRS" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "TPM2_PCRS must be a comma-separated PCR list (got: $TPM2_PCRS)"
+            # Empty TPM2_PCRS = no PCR policy (QEMU/swtpm smoke); production uses 7.
+            [[ "$TPM2_PCRS" =~ ^([0-9]+(,[0-9]+)*)?$ ]] ||
+                die "TPM2_PCRS must be a comma-separated PCR list or empty (got: $TPM2_PCRS)"
             ;;
         *)
             die "LUKS_TPM2 must be 0 or 1 (got: $LUKS_TPM2)"
@@ -894,7 +916,7 @@ Real mkfs is skipped (SKIP_MKFS=1). This tree is a test sysroot:
 
 Bootloader
 ----------
-GRUB (UEFI) or UKI install is owned by $HELPER_BOOT.
+GRUB (UEFI) install is owned by $HELPER_BOOT.
 The installer prepares ESP_DIR and asks the boot helper to leave
 space for later rollback entries (BOOT_ALLOW_EXTRA_ENTRIES=1).
 
@@ -1024,6 +1046,9 @@ export_helper_env() {
     if [[ -n "${VOIDLING_USER:-}" ]]; then
         export VOIDLING_USER
     fi
+    if [[ -n "${VOIDLING_LOCALE:-}" ]]; then
+        export VOIDLING_LOCALE
+    fi
 }
 
 run_or_stub_helper() {
@@ -1101,7 +1126,13 @@ require_apply_prereqs() {
     fi
     if [[ "$LUKS_TPM2" == "1" ]]; then
         require_cmd clevis
-        [[ -c /dev/tpmrm0 || -c /dev/tpm0 ]] || die "--luks-tpm2 needs a TPM2 (/dev/tpmrm0 missing)"
+        if [[ -c /dev/tpmrm0 || -c /dev/tpm0 ]]; then
+            :
+        elif [[ -n "${TPM2TOOLS_TCTI:-}" || -n "${CLEVIS_TPM2_TCTI:-}" ]]; then
+            log "    TPM2: using TCTI ${TPM2TOOLS_TCTI:-$CLEVIS_TPM2_TCTI}"
+        else
+            die "--luks-tpm2 needs a TPM2 (/dev/tpmrm0 missing) or TPM2TOOLS_TCTI"
+        fi
     fi
     [[ -x "$layout" ]] || die "layout helper missing or not executable: $layout"
     [[ -x "$ROOT_DIR/$HELPER_OSTREE" ]] || die "helper missing or not executable: $ROOT_DIR/$HELPER_OSTREE"
@@ -1109,16 +1140,6 @@ require_apply_prereqs() {
     if [[ ! -d "$OSTREE_REPO_DIR" ]]; then
         die "OSTREE_REPO_DIR does not exist: $OSTREE_REPO_DIR (refusing to wipe disk)"
     fi
-}
-
-esp_fat_label() {
-    printf '%.11s\n' "$ESP_LABEL"
-}
-
-sfdisk_script() {
-    printf 'label: gpt\n'
-    printf 'name=%s, size=%sMiB, type=%s\n' "$ESP_LABEL" "$ESP_SIZE_MIB" "$GPT_TYPE_ESP"
-    printf 'name=%s, type=%s\n' "$ROOT_LABEL" "$GPT_TYPE_LINUX"
 }
 
 print_disk_plan() {
@@ -1148,207 +1169,6 @@ print_disk_plan() {
     log "    bash -- $ROOT_DIR/$HELPER_OSTREE"
     log "    bash -- $ROOT_DIR/$HELPER_BOOT"
     log "    bash -- $ROOT_DIR/$HELPER_FIRSTBOOT  # if present; --swap/--luks plan-only"
-}
-
-partition_gpt() {
-    local disk
-    disk="$1"
-    log "==> wiping signatures on $disk"
-    wipefs -a -- "$disk"
-    log "==> partitioning GPT on $disk (ESP ${ESP_SIZE_MIB}MiB + root)"
-    sfdisk_script | sfdisk -- "$disk"
-    if command -v partprobe >/dev/null 2>&1; then
-        partprobe -- "$disk" 2>/dev/null || true
-    fi
-    if command -v udevadm >/dev/null 2>&1; then
-        udevadm settle --timeout=10 2>/dev/null || true
-    fi
-    if command -v blockdev >/dev/null 2>&1; then
-        blockdev --rereadpt -- "$disk" 2>/dev/null || true
-    fi
-    sync
-}
-
-partition_exists() {
-    local path
-    path="$1"
-    [[ -b "$path" ]]
-}
-
-partition_belongs_to_disk() {
-    local part="$1"
-    local disk="$2"
-    local resolved_part resolved_disk
-
-    resolved_part="$(readlink -f -- "$part")"
-    resolved_disk="$(readlink -f -- "$disk")"
-    case "$resolved_part" in
-        "${resolved_disk}"p[0-9]* | "${resolved_disk}"[0-9]*)
-            return 0
-            ;;
-    esac
-    return 1
-}
-
-resolve_partition() {
-    local orig disk num candidate
-    orig="$1"
-    disk="$2"
-    num="$3"
-
-    for candidate in \
-        "${disk}p${num}" \
-        "${disk}${num}" \
-        "${orig}p${num}" \
-        "${orig}${num}" \
-        "${orig}-part${num}" \
-        "${disk}-part${num}"; do
-        if partition_exists "$candidate"; then
-            readlink -f -- "$candidate"
-            return 0
-        fi
-    done
-
-    if [[ "$num" -eq 1 ]]; then
-        candidate="/dev/disk/by-partlabel/${ESP_LABEL}"
-        if partition_exists "$candidate" &&
-            partition_belongs_to_disk "$candidate" "$disk"; then
-            readlink -f -- "$candidate"
-            return 0
-        fi
-    fi
-    if [[ "$num" -eq 2 ]]; then
-        candidate="/dev/disk/by-partlabel/${ROOT_LABEL}"
-        if partition_exists "$candidate" &&
-            partition_belongs_to_disk "$candidate" "$disk"; then
-            readlink -f -- "$candidate"
-            return 0
-        fi
-    fi
-
-    case "$disk" in
-        *[0-9])
-            candidate="${disk}p${num}"
-            ;;
-        *)
-            candidate="${disk}${num}"
-            ;;
-    esac
-    if partition_exists "$candidate"; then
-        readlink -f -- "$candidate"
-        return 0
-    fi
-    return 1
-}
-
-wait_for_partitions() {
-    local orig disk i
-    orig="$1"
-    disk="$2"
-    i=0
-    while [[ "$i" -lt "$PART_WAIT_SECS" ]]; do
-        if resolve_partition "$orig" "$disk" 1 >/dev/null &&
-            resolve_partition "$orig" "$disk" 2 >/dev/null; then
-            return 0
-        fi
-        sleep 1
-        i=$((i + 1))
-    done
-    die "partitions did not appear on $disk"
-}
-
-run_layout_apply() {
-    local extra status_file
-    status_file="$HELPERS_DIR/snapshots.status"
-    if [[ "$FILESYSTEM" == "btrfs" ]]; then
-        extra="--apply -L $ROOT_LABEL -- $ROOT_PART $BTRFS_TOP"
-        record_helper_cmd snapshots "$HELPER_BTRFS" "$extra"
-        log "==> applying Btrfs layout ($HELPER_BTRFS --apply)"
-        mkdir -p -- "$BTRFS_TOP"
-        if bash -- "$ROOT_DIR/$HELPER_BTRFS" --apply -L "$ROOT_LABEL" -- "$ROOT_PART" "$BTRFS_TOP"; then
-            remember_mount "$BTRFS_TOP"
-            write_text_file "$status_file" "ok: executed $HELPER_BTRFS --apply"
-        else
-            write_text_file "$status_file" "failed: $HELPER_BTRFS --apply"
-            die "helper failed: $HELPER_BTRFS --apply"
-        fi
-    else
-        extra="--apply --pool $ZPOOL_NAME --mount-prefix $SYSROOT -- $ROOT_PART"
-        record_helper_cmd snapshots "$HELPER_ZFS" "$extra"
-        log "==> applying ZFS layout ($HELPER_ZFS --apply)"
-        if bash -- "$ROOT_DIR/$HELPER_ZFS" --apply --pool "$ZPOOL_NAME" \
-            --mount-prefix "$SYSROOT" -- "$ROOT_PART"; then
-            ZPOOL_CREATED="$ZPOOL_NAME"
-            write_text_file "$status_file" "ok: executed $HELPER_ZFS --apply"
-        else
-            write_text_file "$status_file" "failed: $HELPER_ZFS --apply"
-            die "helper failed: $HELPER_ZFS --apply"
-        fi
-    fi
-}
-
-mount_btrfs_sysroot() {
-    if findmnt -n -- "$BTRFS_TOP" >/dev/null 2>&1; then
-        sync || true
-        if ! umount -- "$BTRFS_TOP" 2>/dev/null; then
-            sleep 1
-            umount -- "$BTRFS_TOP" 2>/dev/null || umount -l -- "$BTRFS_TOP"
-        fi
-    fi
-    mkdir -p -- "$SYSROOT"
-    mount -o "subvol=@,compress=zstd:1,noatime" -- "$ROOT_PART" "$SYSROOT"
-    remember_mount "$SYSROOT"
-    mkdir -p -- "$SYSROOT/var" "$SYSROOT/home" "$SYSROOT/boot/efi"
-    mount -o "subvol=@var,compress=zstd:1,noatime" -- "$ROOT_PART" "$SYSROOT/var"
-    remember_mount "$SYSROOT/var"
-    mount -o "subvol=@home,compress=zstd:1,noatime" -- "$ROOT_PART" "$SYSROOT/home"
-    remember_mount "$SYSROOT/home"
-}
-
-mount_zfs_sysroot() {
-    mkdir -p -- "$SYSROOT"
-    if ! findmnt -n -- "$SYSROOT" >/dev/null 2>&1; then
-        mount -t zfs -- "${ZPOOL_NAME}/ROOT" "$SYSROOT"
-        remember_mount "$SYSROOT"
-    fi
-    if findmnt -n -- "$SYSROOT/var" >/dev/null 2>&1; then
-        remember_mount "$SYSROOT/var"
-    fi
-    if findmnt -n -- "$SYSROOT/home" >/dev/null 2>&1; then
-        remember_mount "$SYSROOT/home"
-    fi
-    mkdir -p -- "$SYSROOT/boot/efi"
-}
-
-mount_esp() {
-    mkdir -p -- "$ESP_DIR"
-    mount -t vfat -- "$ESP_PART" "$ESP_DIR"
-    remember_mount "$ESP_DIR"
-}
-
-set_root_karg() {
-    local uuid
-    if [[ "$FILESYSTEM" == "zfs" ]]; then
-        ROOT_KARG="ZFS=${ZPOOL_NAME}/ROOT"
-        return 0
-    fi
-    if [[ "$FILESYSTEM" == "btrfs" ]]; then
-        case " ${EXTRA_KARGS:-} " in
-            *" rootflags="*) ;;
-            *)
-                EXTRA_KARGS="${EXTRA_KARGS:-rw zswap.enabled=0 modprobe.blacklist=zswap} rootflags=subvol=@"
-                export EXTRA_KARGS
-                ;;
-        esac
-    fi
-    uuid="$(blkid -p -c /dev/null -s UUID -o value -- "$ROOT_PART" 2>/dev/null || true)"
-    if [[ -n "$uuid" ]]; then
-        ROOT_KARG="UUID=${uuid}"
-        ROOT_FS_UUID="$uuid"
-        export ROOT_FS_UUID
-    else
-        ROOT_KARG="$ROOT_PART"
-    fi
 }
 
 apply_disk_install() {
@@ -1391,94 +1211,28 @@ apply_disk_install() {
     write_crypttab
     write_home_fstab
     write_persistent_kargs
+    create_swapfile
     run_or_stub_helper boot "$HELPER_BOOT"
     run_or_stub_helper firstboot "$HELPER_FIRSTBOOT"
+    run_baseline_snapshot
 }
 
-require_luks_passphrase() {
-    if [[ "$LUKS" != "1" ]]; then
+run_baseline_snapshot() {
+    local helper
+    helper="$ROOT_DIR/$HELPER_BASELINE"
+    if [[ ! -x "$helper" ]]; then
+        log "    baseline snapshot: skipped (missing $helper)"
         return 0
     fi
-    if [[ -z "$LUKS_PASS_FILE" || ! -f "$LUKS_PASS_FILE" ]]; then
-        die "disk apply with --luks requires --luks-passphrase-file (a file, not a flag value on the command line)"
-    fi
-    if [[ ! -s "$LUKS_PASS_FILE" ]]; then
-        die "LUKS passphrase file is empty: $LUKS_PASS_FILE"
-    fi
-}
-
-open_luks_root() {
-    local mapper pass_norm
-    if [[ "$LUKS" != "1" ]]; then
+    log "==> baseline /var snapshot"
+    if bash -- "$helper" --apply --sysroot "$SYSROOT" --filesystem "$FILESYSTEM"; then
         return 0
     fi
-    require_luks_passphrase
-    # --key-file uses the entire file; strip trailing newlines so the key
-    # matches interactive GRUB/cryptsetup passphrase entry (Enter is not part
-    # of the passphrase).
-    pass_norm="$(mktemp -- "${TMPDIR:-/tmp}/voidling-luks-pass-norm.XXXXXX")"
-    # Command substitution strips trailing newlines from the file contents.
-    printf '%s' "$(cat -- "$LUKS_PASS_FILE")" >"$pass_norm"
-    chmod 600 -- "$pass_norm"
-    # Slot 0: PBKDF2 for GRUB cryptomount (Argon2 unsupported in Void GRUB).
-    # Slot 1: argon2id for cryptsetup/initramfs (same passphrase).
-    log "==> LUKS2 format $ROOT_PART (pbkdf2 slot for GRUB)"
-    if ! cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 \
-        --pbkdf-force-iterations 500000 \
-        --key-file "$pass_norm" -- "$ROOT_PART"; then
-        rm -f -- "$pass_norm"
-        die "cryptsetup luksFormat failed on $ROOT_PART"
-    fi
-    log "==> LUKS2 add argon2id keyslot (same passphrase)"
-    if ! cryptsetup luksAddKey --batch-mode --pbkdf argon2id \
-        --key-file "$pass_norm" -- "$ROOT_PART" "$pass_norm"; then
-        log "warning: argon2id luksAddKey failed; continuing with PBKDF2-only"
-    fi
-    LUKS_UUID="$(cryptsetup luksUUID -- "$ROOT_PART")" || true
-    if [[ -z "$LUKS_UUID" ]]; then
-        rm -f -- "$pass_norm"
-        die "cryptsetup did not report a LUKS UUID"
-    fi
-    log "==> opening LUKS as $LUKS_NAME"
-    if ! cryptsetup open --key-file "$pass_norm" -- "$ROOT_PART" "$LUKS_NAME"; then
-        rm -f -- "$pass_norm"
-        die "cryptsetup open failed on $ROOT_PART"
-    fi
-    bind_luks_tpm2 "$pass_norm"
-    rm -f -- "$pass_norm"
-    LUKS_OPENED=1
-    mapper="/dev/mapper/$LUKS_NAME"
-    [[ -b "$mapper" ]] || die "LUKS mapper is missing: $mapper"
-    ROOT_PART="$mapper"
-    # Append — do not replace EXTRA_KARGS (build-ostree-qcow2 sets console=ttyS0).
-    case " ${EXTRA_KARGS:-} " in
-        *" rd.luks.uuid="*) ;;
-        *)
-            if [[ -n "${EXTRA_KARGS:-}" ]]; then
-                EXTRA_KARGS="${EXTRA_KARGS} rd.luks.uuid=${LUKS_UUID}"
-            else
-                EXTRA_KARGS="rd.luks.uuid=${LUKS_UUID}"
-            fi
-            ;;
-    esac
-    export EXTRA_KARGS
-}
-
-# Seal a third keyslot to this machine's TPM2 (clevis tpm2 pin). The
-# initramfs clevis module (compose WITH_TPM2=1) opens it without asking;
-# the GRUB cryptomount prompt remains, so boot asks once. PCR 7 binds to
-# the Secure Boot state: a firmware/key change falls back to the passphrase.
-bind_luks_tpm2() {
-    local pass_norm="$1" cfg
-    if [[ "$LUKS_TPM2" != "1" ]]; then
+    if [[ "${VOIDLING_ALLOW_BASELINE_FAIL:-0}" == "1" ]]; then
+        log "warning: baseline snapshot failed (VOIDLING_ALLOW_BASELINE_FAIL=1)"
         return 0
     fi
-    cfg="$(printf '{"pcr_bank":"sha256","pcr_ids":"%s"}' "$TPM2_PCRS")"
-    log "==> clevis luks bind tpm2 (PCRs $TPM2_PCRS)"
-    if ! clevis luks bind -y -k "$pass_norm" -d "$ROOT_PART" tpm2 "$cfg"; then
-        rm -f -- "$pass_norm"
-        die "clevis luks bind failed on $ROOT_PART (TPM2 present? tree built with WITH_TPM2=1?)"
-    fi
+    die "baseline snapshot failed (set VOIDLING_ALLOW_BASELINE_FAIL=1 to continue)"
 }
 
 deployment_etc_dir() {

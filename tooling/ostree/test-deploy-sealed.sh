@@ -152,6 +152,8 @@ run_commit() {
             OSTREE_REF="$ref" \
             VARIANT="$variant" \
             OUT_DIR="$WORKDIR" \
+            OSTREE_SIGN=0 \
+            VOIDLING_OSTREE_RELAX_SPACE=1 \
             bash -- "$COMMIT_SH"
     )
 }
@@ -170,6 +172,7 @@ run_deploy() {
             ROOT_KARG="UUID=voidling-dummy" \
             EXTRA_KARGS=rw \
             OUT_DIR="$WORKDIR" \
+            VOIDLING_OSTREE_RELAX_SPACE=1 \
             bash -- "$DEPLOY_SH" >"$stdout"
     )
 }

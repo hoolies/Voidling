@@ -125,7 +125,7 @@ if it contains the `.voidling-install-staging` marker (or is empty).
 See `install-voidling.sh --help`. Locked prototype values:
 
 - `TARGET_ARCH=x86_64`, `TARGET_LIBC=glibc`
-- `VARIANT=minimal|plasma`
+- `VARIANT=minimal|plasma|plasma-fenestration`
 - `FILESYSTEM=btrfs|zfs`
 
 ESP + root: 512 MiB FAT ESP, remainder btrfs or zfs.
@@ -137,7 +137,7 @@ ESP + root: 512 MiB FAT ESP, remainder btrfs or zfs.
 | Snapshots (dir) | `tooling/snapshots/prepare-install-layout.sh` | Placeholder dirs; never mkfs |
 | Snapshots (disk apply) | `create-btrfs-layout.sh` / `create-zfs-layout.sh` `--apply` | `mkfs` + subvolumes/datasets |
 | OSTree | `tooling/ostree/deploy-sysroot.sh` | `ostree admin` sysroot deploy from a precomposed ref |
-| Boot | `tooling/boot/install-bootloader.sh` | GRUB/UKI into the ESP, room for rollback entries |
+| Boot | `tooling/boot/install-bootloader.sh` | GRUB into the ESP, room for rollback entries |
 | First-boot | `tooling/firstboot/configure-system.sh` | Hostname, user, locale, NetworkManager, Flatpak (if present) |
 
 If a helper **is** present and executable, directory mode runs it.
@@ -146,9 +146,10 @@ create-*-layout scripts with `--apply` and unsets `SKIP_MKFS`.
 
 This installer does not run `xbps-install` on the target.
 
-`--swap` only records a storage plan (default off). It does not create a
-disk swap device. zram swap is the boot service `voidling-zram` and does
-not follow this flag.
+`--swap` on disk apply creates `/var/swap/swapfile` (size `SWAP_SIZE_MIB`,
+default 2048) and fstab lines. Directory mode still records the plan only.
+zram (`voidling-zram`) remains the default lightweight swap and is
+independent of this flag.
 
 `--luks` records a plan in directory mode. Disk apply
 (`--i-understand-this-wipes-disks`) formats the root partition as LUKS2
@@ -156,6 +157,12 @@ when `--luks-passphrase-file` points at a non-empty file, opens it as
 `voidling-root`, and writes `etc/crypttab` plus `rd.luks.uuid=` on the
 boot entry. The OSTree initrd includes the `crypt` dracut module.
 
-Also stubbed: ARM, a production TUI, and actually applying swap/LUKS.
+Still stubbed: ARM and dedicated disk swap *partitions* (swapfile on `@var`
+is implemented). The guided TUI (`voidling-installer`) covers fenestration,
+disk-by-id, identity, LUKS passphrase entry, TPM2 gating, SB key preflight,
+root-access, and swapfile.
+
+Disk helpers live in sourced libs: `lib-disk-gpt.sh`, `lib-luks.sh`,
+`lib-sysroot-mount.sh`.
 
 Contracts: [INTEGRATION.md](INTEGRATION.md).

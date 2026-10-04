@@ -32,11 +32,18 @@ Environment:
   SUBJECT         commit subject (default: Voidling rootfs VERSION)
   OSTREE_BOOTABLE auto, 1, or 0 (default: auto; 1 if the tree has vmlinuz)
   OSTREE_SIGN     auto (default: ed25519-sign when OUT_DIR/ostree-keys exists
-                  or can be generated), 1 (signing required), 0 (never)
+                  or can be generated), 1 (signing required), 0 (never).
+                  VOIDLING_RELEASE=1 forces OSTREE_SIGN=1.
   OSTREE_KEYS_DIR key directory (default: OUT_DIR/ostree-keys); see
                   tooling/ostree/ensure-signing-keys.sh
+  VOIDLING_OSTREE_RELAX_SPACE
+                  1 = set core.min-free-space-percent 0 (prototype hosts).
+                  Or set OSTREE_MIN_FREE_SPACE_PERCENT explicitly.
+  VOIDLING_RELEASE
+                  1 = release mode: signing required, no unsigned fallback.
 
 Signed commits are verified with ed25519.public right after the commit.
+Release builds must use OSTREE_SIGN=1 or VOIDLING_RELEASE=1.
 EOF
 }
 
@@ -79,15 +86,27 @@ require_tools() {
     command -v ostree >/dev/null 2>&1 || die "ostree not found"
 }
 
+maybe_relax_min_free_space() {
+    local repo="$1" pct
+    if [[ -n "${OSTREE_MIN_FREE_SPACE_PERCENT:-}" ]]; then
+        pct="$OSTREE_MIN_FREE_SPACE_PERCENT"
+    elif [[ "${VOIDLING_OSTREE_RELAX_SPACE:-0}" == "1" ]]; then
+        pct=0
+    else
+        return 0
+    fi
+    [[ "$pct" =~ ^[0-9]+$ ]] || die "OSTREE_MIN_FREE_SPACE_PERCENT must be an integer (got: $pct)"
+    log "    ostree min-free-space-percent=$pct"
+    ostree --repo="$repo" config set core.min-free-space-percent "$pct"
+}
+
 ensure_repo() {
     mkdir -p -- "$OSTREE_REPO_DIR"
     if [[ ! -d "$OSTREE_REPO_DIR/objects" ]]; then
         log "==> initializing ostree repo"
         ostree --repo="$OSTREE_REPO_DIR" init --mode=archive-z2
     fi
-    # This workspace can be space-constrained. For the prototype, relax
-    # ostree's minimum-free-space check so commits can complete.
-    ostree --repo="$OSTREE_REPO_DIR" config set core.min-free-space-percent 0
+    maybe_relax_min_free_space "$OSTREE_REPO_DIR"
 }
 
 rootfs_has_kernel() {
@@ -154,11 +173,24 @@ signing_public_key_file() {
     printf '%s\n' "${OSTREE_KEYS_DIR:-$OUT_DIR/ostree-keys}/ed25519.public"
 }
 
+resolve_ostree_sign_mode() {
+    local mode
+    mode="${OSTREE_SIGN:-auto}"
+    if [[ "${VOIDLING_RELEASE:-0}" == "1" ]]; then
+        if [[ "$mode" == "0" || "$mode" == "no" || "$mode" == "false" ]]; then
+            die "VOIDLING_RELEASE=1 forbids OSTREE_SIGN=0"
+        fi
+        mode=1
+    fi
+    printf '%s\n' "$mode"
+}
+
 maybe_sign_args() {
     local secret keys_dir mode
     # OSTREE_SIGN: auto (default; sign when keys exist or can be generated),
     # 1 (required: fail when signing is impossible), 0 (never sign).
-    mode="${OSTREE_SIGN:-auto}"
+    # VOIDLING_RELEASE=1 forces mode 1.
+    mode="$(resolve_ostree_sign_mode)"
     case "$mode" in
         0 | no | false | NO | FALSE)
             log "    signing: disabled (OSTREE_SIGN=0)"
@@ -201,9 +233,13 @@ maybe_sign_args() {
 }
 
 verify_commit_signature() {
-    local commit="$1" pub
+    local commit="$1" pub mode
     pub="$(signing_public_key_file)"
+    mode="$(resolve_ostree_sign_mode)"
     if [[ ! -r "$pub" ]]; then
+        if [[ "$mode" == "1" || "$mode" == "yes" || "$mode" == "true" ]]; then
+            die "commit $commit signed but public key missing at $pub"
+        fi
         log "    verify: skipped (no public key at $pub)"
         return 0
     fi
@@ -212,10 +248,8 @@ verify_commit_signature() {
         log "    verify: ed25519 signature OK ($pub)"
         return 0
     fi
-    if [[ "${OSTREE_SIGN:-auto}" == "1" ]]; then
-        die "commit $commit does not verify against $pub"
-    fi
-    log "    verify: WARNING commit does not verify against $pub"
+    # Once a signature was attempted, never accept an unverified commit.
+    die "commit $commit does not verify against $pub"
 }
 
 commit_rootfs() {
@@ -243,31 +277,12 @@ commit_rootfs() {
     local err
     err="$(mktemp -- "${TMPDIR:-/tmp}/voidling-ostree-commit.XXXXXX")"
     if ! commit_hash="$(ostree "${commit_args[@]}" 2>"$err")"; then
-        if [[ "${#sign_args[@]}" -gt 0 && "${OSTREE_SIGN:-auto}" == "1" ]]; then
-            cat -- "$err" >&2 || true
-            rm -f -- "$err"
-            die "signed ostree commit failed and OSTREE_SIGN=1 forbids an unsigned fallback"
-        fi
+        cat -- "$err" >&2 || true
+        rm -f -- "$err"
         if [[ "${#sign_args[@]}" -gt 0 ]]; then
-            log "warning: signed commit failed; retrying without signature"
-            cat -- "$err" >&2 || true
-            commit_args=(
-                --repo="$OSTREE_REPO_DIR"
-                commit
-                --branch="$OSTREE_REF"
-                --tree=dir="$ROOTFS_DIR"
-                --subject="$SUBJECT"
-                --add-metadata-string=version="$VERSION"
-            )
-            if want_bootable_commit; then
-                commit_args+=(--bootable)
-            fi
-            commit_hash="$(ostree "${commit_args[@]}")"
-        else
-            cat -- "$err" >&2 || true
-            rm -f -- "$err"
-            die "ostree commit failed"
+            die "signed ostree commit failed; refusing unsigned fallback (use OSTREE_SIGN=0 to commit unsigned)"
         fi
+        die "ostree commit failed"
     fi
     rm -f -- "$err"
     [[ -n "$commit_hash" ]] || die "ostree commit produced no hash"

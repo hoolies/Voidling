@@ -35,6 +35,10 @@ Mandatory arguments to long options are mandatory for short options too.
   -s, --size SIZE       raw disk size (default: 8G)
       --luks-passphrase-file=FILE
                         format the root partition as LUKS2
+      --luks-tpm2       also bind LUKS to TPM2 via clevis (needs TPM2 on
+                        the build host or TPM2TOOLS_TCTI; WITH_TPM2=1 tree)
+      --tpm2-pcrs=LIST  PCRs for --luks-tpm2 (default: 7; empty = no PCR
+                        policy, useful with swtpm)
   -h, --help            display this help and exit
 
 This program must be run as root. It creates a sparse raw disk, attaches it
@@ -124,6 +128,19 @@ parse_args() {
             --luks-passphrase-file=*)
                 LUKS_PASS_FILE="${1#*=}"
                 [[ -n "$LUKS_PASS_FILE" ]] || usage_error "option requires an argument -- 'luks-passphrase-file'"
+                shift
+                ;;
+            --luks-tpm2)
+                LUKS_TPM2=1
+                shift
+                ;;
+            --tpm2-pcrs)
+                require_arg "$@"
+                TPM2_PCRS="$2"
+                shift 2
+                ;;
+            --tpm2-pcrs=*)
+                TPM2_PCRS="${1#*=}"
                 shift
                 ;;
             --)
@@ -268,6 +285,12 @@ EOF
     )
     if [[ -n "${LUKS_PASS_FILE:-}" ]]; then
         install_cmd+=(--luks-passphrase-file="$LUKS_PASS_FILE")
+    fi
+    if [[ "${LUKS_TPM2:-0}" == "1" ]]; then
+        install_cmd+=(--luks-tpm2)
+        if [[ -n "${TPM2_PCRS+x}" ]]; then
+            install_cmd+=(--tpm2-pcrs="$TPM2_PCRS")
+        fi
     fi
     "${install_cmd[@]}"
 

@@ -311,7 +311,12 @@ init_sysroot() {
         rm -rf -- "$SYSROOT_DIR/ostree/repo"
         ostree --repo="$SYSROOT_DIR/ostree/repo" init --mode="$OSTREE_REPO_MODE"
     fi
-    ostree --repo="$SYSROOT_DIR/ostree/repo" config set core.min-free-space-percent 0
+    if [[ -n "${OSTREE_MIN_FREE_SPACE_PERCENT:-}" ]]; then
+        ostree --repo="$SYSROOT_DIR/ostree/repo" config set \
+            core.min-free-space-percent "$OSTREE_MIN_FREE_SPACE_PERCENT"
+    elif [[ "${VOIDLING_OSTREE_RELAX_SPACE:-0}" == "1" ]]; then
+        ostree --repo="$SYSROOT_DIR/ostree/repo" config set core.min-free-space-percent 0
+    fi
 
     if [[ ! -d "$SYSROOT_DIR/ostree/deploy/$OSNAME" ]]; then
         log "==> initializing stateroot"

@@ -18,6 +18,8 @@ readonly ROOT_DIR
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=voidling-boot-lib.sh
 . "${BOOT_DIR}/voidling-boot-lib.sh"
+# shellcheck source=voidling-secureboot-lib.sh
+. "${BOOT_DIR}/voidling-secureboot-lib.sh"
 
 _vbl_temps=()
 _vbl_dep_id=()
@@ -62,9 +64,13 @@ Mandatory arguments to long options are mandatory for short options too.
   -l, --list            list deployments and exit
       --emit-grub       write a GRUB snippet to stdout only
       --no-sysroot-boot do not also write into SYSROOT/boot
+      --secure-boot-gpg  sign grub.cfg + linux/initrd with Voidling GPG
+                        and emit check_signatures=enforce (needs keys)
   -h, --help            display this help and exit
 
 Environment:
+  SECURE_BOOT_GPG       1 = same as --secure-boot-gpg
+  SECUREBOOT_KEYS_DIR   GPG/PE key directory
   SYSROOT               same as --sysroot
   VOIDLING_BOOT_OUT     same as --output-dir
   OSNAME                same as --osname
@@ -103,6 +109,7 @@ parse_args() {
     EMIT_GRUB=0
     NO_SYSROOT_BOOT=0
     OUTPUT_DIR_SET=0
+    SECURE_BOOT_GPG="${SECURE_BOOT_GPG:-0}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -120,6 +127,10 @@ parse_args() {
                 ;;
             --no-sysroot-boot)
                 NO_SYSROOT_BOOT=1
+                shift
+                ;;
+            --secure-boot-gpg)
+                SECURE_BOOT_GPG=1
                 shift
                 ;;
             -s | --sysroot)
@@ -366,6 +377,16 @@ set timeout=${GRUB_TIMEOUT}
 insmod part_gpt
 insmod gzio
 EOF
+    if [[ "${SECURE_BOOT_GPG}" == "1" ]]; then
+        cat <<'EOF'
+insmod pgp
+insmod gcry_sha256
+insmod gcry_sha512
+insmod gcry_rsa
+insmod gcry_dsa
+set check_signatures=enforce
+EOF
+    fi
     if [[ -n "$ROOT_SUBVOL" ]]; then
         # ESP chain already set \$root to the Btrfs device. Re-running
         # search here can clear \$root when modules are not on \$prefix yet.
@@ -421,6 +442,51 @@ write_loader_meta() {
     fi
 }
 
+sign_boot_payloads() {
+    local dest_root="$1"
+    local i linux_abs initrd_abs keys_dir
+    if [[ "${SECURE_BOOT_GPG}" != "1" ]]; then
+        return 0
+    fi
+    keys_dir="$(vsb_resolve_keys_dir "$ROOT_DIR")"
+    vsb_keys_usable "$keys_dir" || die "SECURE_BOOT_GPG=1 but keys missing under $keys_dir"
+    SB_KEYS_DIR="$keys_dir"
+    SB_GPG_HOME="$keys_dir/gnupg"
+    SECURE_BOOT=1
+    export SB_KEYS_DIR SB_GPG_HOME SECURE_BOOT
+    [[ -d "$SB_GPG_HOME" ]] || die "GPG home missing: $SB_GPG_HOME (run ensure-secureboot-keys.sh)"
+    vsb_gpg_sign "${dest_root}/grub.cfg"
+    if [[ -f "${dest_root}/grub/grub-voidling.cfg" ]]; then
+        vsb_gpg_sign "${dest_root}/grub/grub-voidling.cfg"
+    fi
+    for ((i = 0; i < _vbl_dep_count; i++)); do
+        linux_abs="${SYSROOT}${_vbl_dep_linux[$i]}"
+        initrd_abs="${SYSROOT}${_vbl_dep_initrd[$i]}"
+        # Paths may be under /boot/ostree/... relative to sysroot.
+        if [[ ! -f "$linux_abs" && -f "${dest_root}${_vbl_dep_linux[$i]#/boot}" ]]; then
+            linux_abs="${dest_root}${_vbl_dep_linux[$i]#/boot}"
+        fi
+        if [[ -f "$linux_abs" ]]; then
+            vsb_gpg_sign "$linux_abs"
+        else
+            # Try sysroot/boot + relative ostree path
+            if [[ -f "${SYSROOT}/boot${_vbl_dep_linux[$i]}" ]]; then
+                vsb_gpg_sign "${SYSROOT}/boot${_vbl_dep_linux[$i]}"
+            else
+                log "warning: linux image not found for GPG sign: ${_vbl_dep_linux[$i]}"
+            fi
+        fi
+        if [[ -f "$initrd_abs" ]]; then
+            vsb_gpg_sign "$initrd_abs"
+        elif [[ -f "${SYSROOT}/boot${_vbl_dep_initrd[$i]}" ]]; then
+            vsb_gpg_sign "${SYSROOT}/boot${_vbl_dep_initrd[$i]}"
+        else
+            log "warning: initrd not found for GPG sign: ${_vbl_dep_initrd[$i]}"
+        fi
+    done
+    log "    GPG-signed boot payloads under $dest_root"
+}
+
 write_grub_files() {
     local dest_root="$1"
     local tmp
@@ -435,6 +501,7 @@ write_grub_files() {
     _vbl_temps+=("$tmp")
     emit_grub_snippet >"$tmp"
     mv -f -- "$tmp" "${dest_root}/grub/grub-voidling.cfg"
+    sign_boot_payloads "$dest_root"
 }
 
 write_outputs() {

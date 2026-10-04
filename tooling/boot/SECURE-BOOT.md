@@ -1,20 +1,29 @@
-# Secure Boot (live ISO, opt-in)
+# Secure Boot (opt-in)
 
 Voidling ships **no Microsoft-signed shim** (locked decision: unchanged official
 Void binaries only, and Void does not package shim). Secure Boot therefore
 works with a **Voidling-owned key** that the machine owner enrolls once.
 
-Toggle: `SECURE_BOOT=0` (default, unsigned ISO) or `SECURE_BOOT=1` /
-`--secure-boot` on `tooling/image/build-iso.sh`.
+Toggles:
+
+| Surface | How |
+|---------|-----|
+| Live ISO | `build-iso.sh --secure-boot` / `SECURE_BOOT=1` |
+| Kernels in OSTree tree | `SECURE_BOOT=1` (or `SIGN_KERNELS=1`) during compose (`apply-product-clis.sh`) |
+| Installed ESP loaders | `SECURE_BOOT=1` or `SECUREBOOT_KEYS_DIR=…` when `install-bootloader.sh` runs (`APPLY_DISK=1`) |
+
+Private keys stay on the **build/install host** and never ship on the ISO.
+Shared helpers: `tooling/boot/voidling-secureboot-lib.sh`.
 
 ## Chain
 
 | Stage | Mechanism | Signed with |
 |-------|-----------|-------------|
 | Firmware → `EFI/BOOT/BOOTX64.EFI` | UEFI db check (Authenticode) | `voidling-sb.key` via `sbsign` |
-| GRUB → embedded `grub.cfg` | GRUB `pgp` verifier, `check_signatures=enforce` | `voidling-grub` GPG key |
-| GRUB → `/boot/vmlinuz`, `/boot/initrd` | GRUB `pgp` verifier (`*.sig` on the ISO) | `voidling-grub` GPG key |
-| Kernel | also Authenticode-signed (`sbsign`) for firmware/shim loaders | `voidling-sb.key` |
+| GRUB → embedded `grub.cfg` (live ISO) | GRUB `pgp` verifier, `check_signatures=enforce` | `voidling-grub` GPG key |
+| GRUB → `/boot/vmlinuz`, `/boot/initrd` (live ISO) | GRUB `pgp` verifier (`*.sig` on the ISO) | `voidling-grub` GPG key |
+| Kernel (tree + ISO) | Authenticode (`sbsign`) | `voidling-sb.key` |
+| Installed ESP `BOOTX64.EFI` / `grubx64.efi` | Authenticode at disk install | `voidling-sb.key` on installing host |
 
 GRUB is built standalone (`grub-mkstandalone --disable-shim-lock --sbat ... --pubkey ...`),
 so no shim protocol is required and every module `grub.cfg` needs is built
@@ -72,14 +81,41 @@ PK/KEK/db and `SecureBootEnable=ON` (via `virt-fw-vars` from the
 with `tooling/image/boot-qemu.sh --secure-boot --ovmf-vars …` (SMM OVMF build,
 `q35,smm=on`). Success marker: `SECURE_BOOT_OK`.
 
+## Installed systems (GRUB GPG + ESP)
+
+When `SECURE_BOOT=auto|1` during disk install / `install-bootloader.sh`:
+
+1. Resolve keys (`SECUREBOOT_KEYS_DIR`, `out/secureboot-keys`, or a USB at
+   `/run/media/*/secureboot-keys`).
+2. Build a **GPG-enforced** removable `BOOTX64.EFI` via `grub-mkstandalone`
+   (`check_signatures=enforce` + embedded `voidling-grub.gpg`).
+3. Authenticode-sign ESP PE loaders (`sbsign`).
+4. `generate-boot-menu.sh --secure-boot-gpg` signs `@/boot/grub.cfg` and each
+   deployment's linux/initrd (`.sig` next to the files). Upgrades pass the
+   same flag when `SECURE_BOOT` / `SECURE_BOOT_GPG` is set.
+
+### Bare-metal / live ISO installs
+
+Private keys **never** ship on the ISO. If firmware Secure Boot is enabled
+(or `SECURE_BOOT=1`), install **fail-closes** unless keys are available on
+the installing host:
+
+```text
+/run/media/<user>/secureboot-keys/   # USB stick
+  voidling-sb.key
+  voidling-sb.crt
+  voidling-grub.gpg
+  gnupg/                             # GRUB signing home
+```
+
+`SECURE_BOOT=0` leaves the ESP unsigned (firmware with Voidling enrolled will
+then refuse to boot — intentional).
+
+Smokes: `tooling/image/test-secureboot-iso.sh`,
+`tooling/image/test-installed-secureboot.sh`.
+
 ## Scope and limits
 
-- **Live ISO only.** Installed systems boot the OSTree-committed kernel and
-  the GRUB written by `voidling-grub-esp.sh`; those are not signed yet. To
-  extend: sign the ESP GRUB at install time with the same key (the private
-  key must then be available on the installing host, never on the ISO), and
-  either sign kernels at compose time or move to a shim + MOK flow.
-- No Microsoft chain: a machine with factory keys only will refuse the medium
-  until the Voidling certificate is enrolled. This is intentional.
-- `dbx` revocations are the owner's responsibility (no SBAT enforcement
-  without shim).
+- No Microsoft chain: factory keys alone refuse the medium until enrollment.
+- `dbx` revocations are the owner's responsibility (no SBAT / shim).
+- Bootloader is GRUB + BLS only (`docs/uki-decision.md`).

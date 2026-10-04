@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Ensure the Flathub remote exists in a SYSROOT. Do not run flatpak install.
+# Ensure the Flathub remote exists in a SYSROOT and optionally install
+# Fenestration Flatpaks (from offline cache or Flathub).
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
@@ -44,9 +45,10 @@ Environment:
   VOIDLING_ROOT           repo root (default: derived from this script)
 
 The Plasma overlay already ships usr/share/flatpak/remotes.d/flathub.flatpakrepo.
-This script does not run flatpak install or xbps-install. If a Fenestration
-marker is present, it documents the Flathub IDs for a later first-boot
-\`flatpak install\` on the running system.
+When a Fenestration marker is present and INSTALL_FENESTRATION_FLATPAKS=1
+(default), this script also runs \`flatpak install\` from
+VOIDLING_FLATPAK_CACHE (offline) or Flathub. Set INSTALL_FENESTRATION_FLATPAKS=0
+to only write the plan file.
 EOF
 }
 
@@ -261,42 +263,39 @@ find_fenestration_list() {
     printf '%s' ""
 }
 
+fenestration_ids() {
+    local list line
+    list="$(find_fenestration_list)"
+    if [[ -n "$list" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            case "$line" in
+                '' | \#*) continue ;;
+            esac
+            printf '%s\n' "$line"
+        done <"$list"
+        return 0
+    fi
+    printf '%s\n' \
+        com.usebottles.bottles \
+        com.heroicgameslauncher.hgl \
+        net.davidotek.pupgui2 \
+        org.winehq.Wine
+}
+
 document_fenestration_flatpaks() {
-    local list dest line ids body
+    local dest line body
     dest="$ETC_DIR/$FENESTRATION_PLAN"
     if ! marker_present; then
         log "    no Fenestration marker; skip flatpak install list"
         return 0
     fi
-    list="$(find_fenestration_list)"
-    ids=()
-    if [[ -n "$list" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            case "$line" in
-                '' | \#*)
-                    continue
-                    ;;
-            esac
-            ids+=("$line")
-        done <"$list"
-    fi
-    if [[ ${#ids[@]} -eq 0 ]]; then
-        ids=(
-            com.usebottles.bottles
-            com.heroicgameslauncher.hgl
-            net.davidotek.pupgui2
-            org.winehq.Wine
-        )
-    fi
-    body="# Fenestration Flatpaks (document only)
-# Run on the booted system after first boot. Do not xbps-install these.
-# Flathub must already be configured (usr/share/flatpak/remotes.d or
-# /etc/flatpak/remotes.d).
+    body="# Fenestration Flatpaks
+# Prefer offline cache VOIDLING_FLATPAK_CACHE, else Flathub.
 #
 "
-    for line in "${ids[@]}"; do
-        body+="flatpak install --or-update flathub ${line}"$'\n'
-    done
+    while IFS= read -r line; do
+        body+="flatpak install --or-update -y flathub ${line}"$'\n'
+    done < <(fenestration_ids)
     if [[ "$DRY_RUN" == "1" ]]; then
         log "dry-run: would write $dest"
         return 0
@@ -304,6 +303,98 @@ document_fenestration_flatpaks() {
     mkdir -p -- "$(dirname -- "$dest")"
     printf '%s' "$body" >"$dest"
     log "    documented Fenestration flatpak install list: $dest"
+}
+
+flatpak_cache_dir() {
+    local d
+    for d in \
+        "${VOIDLING_FLATPAK_CACHE:-}" \
+        "$SYSROOT/usr/share/voidling/flatpak-cache" \
+        "$SYSROOT/var/lib/voidling/flatpak-cache" \
+        "/usr/share/voidling/flatpak-cache" \
+        "/var/lib/voidling/flatpak-cache"; do
+        if [[ -n "$d" && -d "$d" ]]; then
+            printf '%s\n' "$d"
+            return 0
+        fi
+    done
+    printf '%s\n' ""
+}
+
+# Copy offline bundles from live media / host into the deployment for first boot.
+stage_flatpak_cache_into_sysroot() {
+    local src dest
+    if ! marker_present; then
+        return 0
+    fi
+    dest="$SYSROOT/var/lib/voidling/flatpak-cache"
+    if [[ -d "$dest" ]] && compgen -G "$dest"/*.flatpak >/dev/null 2>&1; then
+        return 0
+    fi
+    for src in \
+        "${VOIDLING_FLATPAK_CACHE:-}" \
+        "/usr/share/voidling/flatpak-cache" \
+        "/var/lib/voidling/flatpak-cache" \
+        "/run/initramfs/live/flatpak-cache" \
+        "/run/rootfsbase/usr/share/voidling/flatpak-cache"; do
+        if [[ -n "$src" && -d "$src" ]] && compgen -G "$src"/*.flatpak >/dev/null 2>&1; then
+            if [[ "$DRY_RUN" == "1" ]]; then
+                log "dry-run: would stage Flatpak cache $src → $dest"
+                return 0
+            fi
+            mkdir -p -- "$dest"
+            cp -a -- "$src"/. "$dest"/
+            log "    staged offline Flatpak cache → $dest"
+            return 0
+        fi
+    done
+}
+
+install_fenestration_flatpaks() {
+    local cache id bundle rc=0
+    case "${INSTALL_FENESTRATION_FLATPAKS:-1}" in
+        0 | no | false | NO | FALSE) return 0 ;;
+    esac
+    if ! marker_present; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" == "1" ]]; then
+        log "dry-run: would install Fenestration Flatpaks"
+        return 0
+    fi
+    stage_flatpak_cache_into_sysroot
+    if ! command -v flatpak >/dev/null 2>&1; then
+        log "    flatpak not on PATH; plan written only (install on first boot)"
+        return 0
+    fi
+    # Installing into a sysroot tree needs a booted/deployment user env; when
+    # SYSROOT is not live /, only stage from cache into the deployment's var.
+    if [[ "$(readlink -f -- "$SYSROOT")" != "/" ]]; then
+        log "    Fenestration Flatpak install deferred to first boot (SYSROOT != /)"
+        return 0
+    fi
+    cache="$(flatpak_cache_dir)"
+    ensure_flathub_remote
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        bundle=""
+        if [[ -n "$cache" ]]; then
+            shopt -s nullglob
+            for bundle in "$cache/$id".flatpak "$cache/${id##*.}".flatpak; do
+                [[ -f "$bundle" ]] && break
+                bundle=""
+            done
+            shopt -u nullglob
+        fi
+        if [[ -n "$bundle" ]]; then
+            log "    flatpak install (offline): $bundle"
+            flatpak install --or-update -y --noninteractive "$bundle" || rc=1
+        else
+            log "    flatpak install flathub $id"
+            flatpak install --or-update -y --noninteractive flathub "$id" || rc=1
+        fi
+    done < <(fenestration_ids)
+    return "$rc"
 }
 
 main() {
@@ -323,6 +414,8 @@ main() {
 
     ensure_flathub_remote
     document_fenestration_flatpaks
+    stage_flatpak_cache_into_sysroot
+    install_fenestration_flatpaks
 }
 
 main "$@"

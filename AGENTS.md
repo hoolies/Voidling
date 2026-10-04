@@ -7,6 +7,7 @@
 - **Immutability**: immutable host; `xbps` is **read-only** on the running system.
 - **Update backend**: OSTree-style commits/deployments.
 - **Rollback UX**: boot menu entries by default + CLI tool.
+- **Bootloader**: **GRUB + OSTree BLS only** (no UKI, sd-boot, or shim). See `docs/uki-decision.md`.
 - **Architectures**: `x86_64` glibc. ARM glibc is **back-burner** (do not implement).
 - **Apps priority**: Flatpak first (Flathub) → Sourcing → Distrobox → AppImage.
 - **xbps**: read-only on the running host, **enforced by mounts** (`/usr`, `/var/db/xbps`, `/var/cache/xbps`).
@@ -15,7 +16,7 @@
 - **Git**: owner creates the repo; do not `git init`.
 - **Filesystems**: ZFS preferred when the install medium ships it, Btrfs otherwise (`--filesystem=auto`; shipped ISOs are `WITH_ZFS=0`, so they install Btrfs). Snapshots before major changes; keep last 3 per type + user-pinned.
 - **Credentials**: lab login `voidling`/`voidling` on images and live ISO; live ISO root has no password. Installed systems force replacing the lab user on first login; root access policy `--root-access=locked|password|none` (default `locked`).
-- **Supply chain**: OSTree commits are ed25519-signed when `out/ostree-keys` exists (`OSTREE_SIGN=auto`); the public key ships in the tree. Secure Boot is an on/off ISO option (`build-iso.sh --secure-boot`). Private keys never enter git.
+- **Supply chain**: OSTree commits are ed25519-signed when `out/ostree-keys` exists (`OSTREE_SIGN=auto`); releases use `VOIDLING_RELEASE=1` / `OSTREE_SIGN=1` (no unsigned fallback). The public key ships in the tree. Secure Boot: ISO (`build-iso.sh --secure-boot`), compose kernel signing (`SECURE_BOOT=1`), installed ESP when keys are on the installing host. Private keys never enter git.
 - **Shell**: every script passes `bash tooling/ci.sh` (shellcheck, shfmt, unit tests) before commit.
 
 ## Vocabulary
@@ -32,7 +33,7 @@
 
 ## Image variants (rootfs + OSTree)
 
-Two product images. Kernel + GRUB is `BOOTABLE=1` on the same variant (not a third flavor).
+Three product images. Kernel + GRUB is `BOOTABLE=1` on the same variant (not a separate flavor).
 
 | Variant | Intent | Rootfs | OSTree ref |
 |---------|--------|--------|------------|
@@ -40,7 +41,7 @@ Two product images. Kernel + GRUB is `BOOTABLE=1` on the same variant (not a thi
 | `plasma` | Full KDE Plasma; zsh + Bourne_Again git_config; Alacritty/Zen/Dolphin | `out/rootfs-x86_64-glibc-plasma/` | `voidling/x86_64/glibc/plasma` |
 | `plasma-fenestration` | Optional Plasma plus Windows/gaming stack | `out/rootfs-x86_64-glibc-plasma-fenestration/` | `voidling/x86_64/glibc/plasma-fenestration` |
 
-Presets: `tooling/compose/compose-minimal-rootfs.sh`, `tooling/compose/compose-plasma-rootfs.sh`, `tooling/compose/compose-fenestration-rootfs.sh`. VM/ISO: `BOOTABLE=1` or `compose-bootable-rootfs.sh --variant=minimal|plasma`.
+Presets: `tooling/compose/compose-minimal-rootfs.sh`, `tooling/compose/compose-plasma-rootfs.sh`, `tooling/compose/compose-fenestration-rootfs.sh`. VM/ISO: `BOOTABLE=1` or `compose-bootable-rootfs.sh --variant=minimal|plasma|plasma-fenestration`.
 
 Prototype follow-ons: `tooling/image/` (minimal qcow2 and live ISO booted), `tooling/initramfs/`, `tooling/boot/voidling-upgrade.sh`, `tooling/installer/` (disk apply behind danger flag), `tooling/firstboot/`, `tooling/snapshots/` (restore), `tooling/sourcing/` (compose extras wired), `tooling/container/` (`voidling-minimal:local` built).
 

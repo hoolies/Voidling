@@ -17,8 +17,8 @@ device. That flag **does** turn on formatting when `--dry-run` is not set.
 
 ## What a disk install does (when armed)
 
-1. **Choose variant:** `minimal` (no DE/WM) or `plasma` (full KDE experience).
-   Optional later checkbox: Fenestration (`plasma-fenestration`).
+1. **Choose variant:** `minimal`, `plasma`, or `plasma-fenestration`
+   (`voidling-installer` menu or `--variant=`).
 2. **Choose filesystem:** `--filesystem=auto` (default) picks ZFS when the
    install medium has `zpool`+`zfs`, otherwise Btrfs; `zfs`/`btrfs` force it.
    Shipped ISOs are `WITH_ZFS=0`, so they install Btrfs. Not ext4 (the qcow2
@@ -41,31 +41,32 @@ device. That flag **does** turn on formatting when `--dry-run` is not set.
    rollback menu entries. Extra slots left for previous deployments.
 7. **Immutable mounts:** the `voidling-immutable` runit service remounts `/usr`
    and xbps db/cache read-only on first boot.
-8. **Reboot** into the new deployment.
+8. **Baseline** pinned `/var` snapshot (`create-baseline-snapshot.sh`); fails
+   the install unless `VOIDLING_ALLOW_BASELINE_FAIL=1`.
+9. **Reboot** into the new deployment.
 
 Refused dests include `/`, `/boot`, `/usr`, `/etc`, `/var`, `/root`, `/home`,
 and other system paths; partitions (need a whole disk); mounted devices; and
 the disk that backs the host `/` or `/boot`. Missing `OSTREE_REPO_DIR` also
 refuses to wipe.
 
-First-boot identity (hostname, user, locale, NetworkManager) is a separate
-helper (`configure-system.sh`) when present. `--swap` is plan-only.
-`--luks` is plan-only in directory mode. Disk apply with
-`--luks-passphrase-file` formats the root partition as LUKS2.
-zram swap is a boot service (`voidling-zram`), independent of `--swap`.
-ARM is still out of scope.
+Identity (hostname, user, locale) is collected by `voidling-installer` and
+passed through to `configure-system.sh`. Disk apply with
+`--luks-passphrase-file` formats LUKS2; `--luks-tpm2` needs a `WITH_TPM2=1`
+tree and a TPM device. `--swap` creates `/var/swap/swapfile` (NOCOW on Btrfs).
+zram (`voidling-zram`) is independent of `--swap`. ARM is still out of scope.
 
 ## What you run today
 
 ```bash
 bash tooling/installer/install-voidling.sh
-# VARIANT=minimal|plasma  FILESYSTEM=zfs|btrfs  TARGET=dir
+# VARIANT=minimal|plasma|plasma-fenestration  FILESYSTEM=zfs|btrfs|auto  TARGET=dir
 
-bash tooling/installer/voidling-installer   # tty menu
+bash tooling/installer/voidling-installer   # tty menu (dialog when present)
 ```
 
 On a live ISO, the same commands are on PATH after boot (`sudo voidling-installer`,
-or `sudo install-voidling` for flags). Plasma defaults `VARIANT=plasma`. Disk
+or `sudo install-voidling` for flags). Live media includes `dialog`. Disk
 install still needs a source OSTree repo (`OSTREE_REPO_DIR`); directory mode
 does not.
 

@@ -13,26 +13,34 @@ readonly ROOT_DIR
 
 SKIP_UPGRADE=0
 SKIP_LUKS=0
+SKIP_LUKS_TPM2=0
 SKIP_LIVE=0
 SKIP_PLASMA_BOOT=0
 SKIP_LOGIN=0
 SKIP_SECUREBOOT=0
+SKIP_SB_INSTALLED=0
+SKIP_LUKS_TPM2_PCR7=0
 SKIP_UNIT=0
 
 usage() {
     cat <<EOF
 Usage: $PROGNAME [OPTION]...
-Run Voidling smoke harnesses (unit tests, upgrade, LUKS, live install,
-plasma boot, login, Secure Boot ISO).
+Run Voidling smoke harnesses (unit tests, upgrade, LUKS, LUKS+TPM2,
+live install, plasma boot, login, Secure Boot ISO).
 
 Mandatory arguments to long options are mandatory for short options too.
 
       --skip-upgrade    skip guest upgrade/rollback/@var restore
       --skip-luks       skip LUKS unlock → runit
+      --skip-luks-tpm2  skip LUKS+clevis/swtpm unlock → runit
       --skip-live       skip live ISO → second-disk install
       --skip-plasma     skip plasma OSTree qcow2 boot check
       --skip-login      skip serial login with voidling/voidling
       --skip-secureboot skip signed live ISO under enrolled OVMF Secure Boot
+      --skip-sb-installed
+                        skip installed-system Secure Boot qcow2 smoke
+      --skip-luks-tpm2-pcr7
+                        skip guest clevis PCR7 bind + reboot smoke
       --skip-unit       skip non-root unit tests (tooling/ci.sh --tests-only)
   -h, --help            display this help and exit
 
@@ -70,6 +78,10 @@ parse_args() {
                 SKIP_LUKS=1
                 shift
                 ;;
+            --skip-luks-tpm2)
+                SKIP_LUKS_TPM2=1
+                shift
+                ;;
             --skip-live)
                 SKIP_LIVE=1
                 shift
@@ -84,6 +96,14 @@ parse_args() {
                 ;;
             --skip-secureboot)
                 SKIP_SECUREBOOT=1
+                shift
+                ;;
+            --skip-sb-installed)
+                SKIP_SB_INSTALLED=1
+                shift
+                ;;
+            --skip-luks-tpm2-pcr7)
+                SKIP_LUKS_TPM2_PCR7=1
                 shift
                 ;;
             --skip-unit)
@@ -264,6 +284,10 @@ main() {
         run_step luks-unlock \
             bash -- "$ROOT_DIR/tooling/image/test-luks-ostree-boot.sh"
     fi
+    if [[ "$SKIP_LUKS_TPM2" -eq 0 ]]; then
+        run_step luks-tpm2-unlock \
+            bash -- "$ROOT_DIR/tooling/image/test-luks-tpm2-boot.sh"
+    fi
     if [[ "$SKIP_LIVE" -eq 0 ]]; then
         run_step live-second-disk \
             bash -- "$ROOT_DIR/tooling/image/test-live-second-disk-qemu.sh"
@@ -283,6 +307,14 @@ main() {
     if [[ "$SKIP_SECUREBOOT" -eq 0 ]]; then
         run_step secure-boot-iso \
             bash -- "$ROOT_DIR/tooling/image/test-secureboot-iso.sh"
+    fi
+    if [[ "$SKIP_SB_INSTALLED" -eq 0 ]]; then
+        run_step secure-boot-installed \
+            bash -- "$ROOT_DIR/tooling/image/test-installed-secureboot.sh"
+    fi
+    if [[ "$SKIP_LUKS_TPM2_PCR7" -eq 0 ]]; then
+        run_step luks-tpm2-pcr7 \
+            bash -- "$ROOT_DIR/tooling/image/test-luks-tpm2-pcr7-guest.sh"
     fi
 
     log "==> all requested smokes ok"

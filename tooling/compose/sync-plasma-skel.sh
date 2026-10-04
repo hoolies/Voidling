@@ -13,7 +13,10 @@ export LC_ALL=C
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly ROOT_DIR
 
-SRC_CFG="${SRC_CFG:-/home/hoolies/Projects/Bourne_Again/git_config/.config}"
+# Prefer an explicit SRC_CFG. Otherwise try sibling Bourne_Again checkout,
+# then VOIDLING_BOURNE_AGAIN_CFG. Never invent a silent wrong path in CI.
+DEFAULT_SRC_CANDIDATE="$(cd -- "$ROOT_DIR/.." && pwd)/Bourne_Again/git_config/.config"
+SRC_CFG="${SRC_CFG:-${VOIDLING_BOURNE_AGAIN_CFG:-}}"
 DEST="${DEST:-$ROOT_DIR/overlays/plasma/etc/skel}"
 
 usage() {
@@ -26,8 +29,13 @@ Mandatory arguments to long options are mandatory for short options too.
   -h, --help            display this help and exit
 
 Environment:
-  SRC_CFG  source git_config/.config (default: Bourne_Again git_config/.config)
+  SRC_CFG  source git_config/.config (required unless a sibling
+           ../Bourne_Again/git_config/.config exists, or
+           VOIDLING_BOURNE_AGAIN_CFG is set)
   DEST     destination skel directory (default: <repo>/overlays/plasma/etc/skel)
+
+Not run by CI or compose. Refresh skel on a workstation that has the
+Bourne_Again tree, then commit overlays/plasma/etc/skel.
 
 Copied (with hoolies→voidling on text files):
   .vimrc, shell/, tmux/, alacritty/, helix/, yazi/, conky/, espanso/,
@@ -82,7 +90,20 @@ transform() {
         -e 's|github.com/__HOOLIES_GH__/|github.com/hoolies/|g'
 }
 
+resolve_src_cfg() {
+    if [[ -n "$SRC_CFG" ]]; then
+        return 0
+    fi
+    if [[ -d "$DEFAULT_SRC_CANDIDATE" ]]; then
+        SRC_CFG="$DEFAULT_SRC_CANDIDATE"
+        return 0
+    fi
+    die "SRC_CFG unset and no sibling Bourne_Again checkout at $DEFAULT_SRC_CANDIDATE
+Set SRC_CFG or VOIDLING_BOURNE_AGAIN_CFG to git_config/.config, or skip skel sync in CI."
+}
+
 require_sources() {
+    resolve_src_cfg
     [[ -d "$SRC_CFG" ]] || die "missing source directory: $SRC_CFG"
     [[ -f "$SRC_CFG/shell/.zshrc" ]] || die "missing $SRC_CFG/shell/.zshrc"
     [[ -f "$SRC_CFG/.vimrc" ]] || die "missing $SRC_CFG/.vimrc"

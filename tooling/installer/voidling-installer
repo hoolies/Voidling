@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Guided menu for the Voidling prototype installer. Prefers dialog; falls back
-# to a numbered POSIX-style menu. Always execs install-voidling.sh.
+# Guided menu for the Voidling installer. Prefers dialog; falls back to a
+# numbered menu. Always execs install-voidling.sh (unless --dry-run).
 set -euo pipefail
 
 unalias -a 2>/dev/null || true
-unset -f mkdir rm printf cat mktemp command bash dialog 2>/dev/null || true
+unset -f mkdir rm printf cat mktemp command bash dialog ls readlink \
+    findmnt 2>/dev/null || true
 
 readonly PROGNAME="${0##*/}"
 export LC_ALL=C
@@ -13,14 +14,25 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly ROOT_DIR
 readonly INSTALLER="$ROOT_DIR/tooling/installer/install-voidling.sh"
 readonly WIPE_PHRASE="I UNDERSTAND THIS WIPES DISKS"
+readonly SB_LIB="$ROOT_DIR/tooling/boot/voidling-secureboot-lib.sh"
 
 TMP_DIR=""
 UI="menu"
+DRY_RUN=0
 VARIANT="${VARIANT:-minimal}"
-FILESYSTEM="${FILESYSTEM:-zfs}"
+FILESYSTEM="${FILESYSTEM:-auto}"
 TARGET="dir"
 DEST=""
 WIPE_ACK=0
+LUKS=0
+LUKS_TPM2=0
+LUKS_PASS_FILE=""
+ROOT_ACCESS="${ROOT_ACCESS:-locked}"
+SWAP=0
+SECURE_BOOT="${SECURE_BOOT:-auto}"
+VOIDLING_HOSTNAME="${VOIDLING_HOSTNAME:-voidling}"
+VOIDLING_USER="${VOIDLING_USER:-voidling}"
+VOIDLING_LOCALE="${VOIDLING_LOCALE:-}"
 
 usage() {
     cat <<EOF
@@ -30,9 +42,15 @@ Guided Voidling install menu (calls install-voidling.sh).
 Mandatory arguments to long options are mandatory for short options too.
 
       --ui=MODE         dialog or menu (default: dialog if available, else menu)
+      --dry-run         print the install-voidling.sh invocation and exit
   -h, --help            display this help and exit
 
-This is a sketch in the spirit of void-installer, not a full TUI.
+Prompts for variant (minimal / plasma / plasma-fenestration), filesystem
+(auto / btrfs / zfs), target (directory or whole disk by-id), hostname,
+user, locale, LUKS passphrase (created in a temp file), optional TPM2 when
+clevis and a TPM device are present, root-access policy, optional swapfile,
+and Secure Boot key availability (preflight before wipe).
+
 Noninteractive installs: use install-voidling.sh. Default target is a
 directory. Disk mode wipes the chosen device only after you type the
 acknowledgment phrase (same as --i-understand-this-wipes-disks).
@@ -78,6 +96,10 @@ parse_args() {
                 UI="${1#*=}"
                 shift
                 ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
             --)
                 shift
                 break
@@ -109,8 +131,7 @@ resolve_ui() {
             ;;
     esac
     if [[ "$UI" == "dialog" ]] && ! command -v dialog >/dev/null 2>&1; then
-        warn_fallback="dialog not found; using numbered menu"
-        log "warning: $warn_fallback"
+        log "warning: dialog not found; using numbered menu"
         UI="menu"
     fi
 }
@@ -166,7 +187,7 @@ dialog_pick() {
         args+=("$i" "$opt")
         i=$((i + 1))
     done
-    if ! dialog --clear --title "Voidling installer" --menu "$title" 16 60 8 \
+    if ! dialog --clear --title "Voidling installer" --menu "$title" 18 72 10 \
         "${args[@]}" 2>"$tmp"; then
         die "cancelled"
     fi
@@ -181,6 +202,17 @@ dialog_input() {
     tmp="$TMP_DIR/dialog-out"
     if ! dialog --clear --title "Voidling installer" --inputbox "$title" 10 70 \
         "$default" 2>"$tmp"; then
+        die "cancelled"
+    fi
+    cat -- "$tmp"
+}
+
+dialog_password() {
+    local title tmp
+    title="$1"
+    tmp="$TMP_DIR/dialog-out"
+    if ! dialog --clear --title "Voidling installer" --insecure --passwordbox \
+        "$title" 10 70 2>"$tmp"; then
         die "cancelled"
     fi
     cat -- "$tmp"
@@ -206,106 +238,339 @@ confirm_yes() {
     return 1
 }
 
+prompt_text() {
+    local title default value
+    title="$1"
+    default="$2"
+    if [[ "$UI" == "dialog" ]]; then
+        value="$(dialog_input "$title" "$default")"
+    else
+        value="$(read_line "$title [$default]: ")"
+    fi
+    if [[ -z "$value" ]]; then
+        value="$default"
+    fi
+    printf '%s' "$value"
+}
+
+prompt_password_twice() {
+    local title="$1" a b
+    if [[ "$UI" == "dialog" ]]; then
+        a="$(dialog_password "$title")"
+        b="$(dialog_password "Confirm: $title")"
+    else
+        # shellcheck disable=SC2162
+        printf '%s' "$title: " >&2
+        stty -echo 2>/dev/null || true
+        IFS= read -r a || {
+            stty echo 2>/dev/null || true
+            die "no input"
+        }
+        printf '\n' >&2
+        printf '%s' "Confirm: " >&2
+        IFS= read -r b || {
+            stty echo 2>/dev/null || true
+            die "no input"
+        }
+        printf '\n' >&2
+        stty echo 2>/dev/null || true
+    fi
+    [[ -n "$a" ]] || die "empty passphrase"
+    [[ "$a" == "$b" ]] || die "passphrases do not match"
+    printf '%s' "$a"
+}
+
+list_disk_by_id() {
+    local p name
+    shopt -s nullglob
+    for p in /dev/disk/by-id/*; do
+        name="${p##*/}"
+        case "$name" in
+            *-part[0-9]* | wwn-*-part[0-9]* | nvme-*-part[0-9]*) continue ;;
+            usb-* | ata-* | nvme-* | scsi-* | wwn-* | virtio-*) ;;
+            *) continue ;;
+        esac
+        [[ -b "$p" ]] || continue
+        printf '%s\n' "$p"
+    done
+    shopt -u nullglob
+}
+
+pick_disk_by_id() {
+    local -a disks labels
+    local d pick
+    disks=()
+    labels=()
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        disks+=("$d")
+        labels+=("$d")
+    done < <(list_disk_by_id)
+    if [[ ${#disks[@]} -eq 0 ]]; then
+        log "warning: no /dev/disk/by-id whole-disk links found"
+        DEST="$(prompt_text "Block device to WIPE (prefer /dev/disk/by-id/...)" \
+            "/dev/disk/by-id/")"
+        [[ -n "$DEST" ]] || die "disk target requires a device path"
+        return 0
+    fi
+    labels+=("enter path manually")
+    pick="$(menu_pick "Whole disk to WIPE (by-id)" "${labels[@]}")"
+    if [[ "$pick" == "enter path manually" ]]; then
+        DEST="$(prompt_text "Block device to WIPE" "/dev/disk/by-id/")"
+        [[ -n "$DEST" ]] || die "disk target requires a device path"
+        return 0
+    fi
+    DEST="$pick"
+}
+
+tree_has_clevis() {
+    local rootfs
+    rootfs="${ROOTFS_DIR:-${OUT_DIR:-$ROOT_DIR/out}/rootfs-${TARGET_ARCH:-x86_64}-${TARGET_LIBC:-glibc}-minimal}"
+    if [[ -x "$rootfs/usr/bin/clevis" ]] || [[ -x /usr/bin/clevis ]]; then
+        return 0
+    fi
+    if command -v clevis >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+tpm_device_present() {
+    [[ -c /dev/tpmrm0 || -c /dev/tpm0 || -n "${TPM2TOOLS_TCTI:-}" || -n "${CLEVIS_TPM2_TCTI:-}" ]]
+}
+
+sb_keys_preflight() {
+    local keys mode
+    # shellcheck source=../boot/voidling-secureboot-lib.sh
+    . "$SB_LIB"
+    mode="$(SECURE_BOOT="$SECURE_BOOT" vsb_secure_boot_mode)"
+    if [[ "$mode" != "1" ]]; then
+        log "Secure Boot ESP signing: off for this install"
+        return 0
+    fi
+    keys="$(vsb_resolve_keys_dir "$ROOT_DIR")"
+    if vsb_keys_usable "$keys"; then
+        log "Secure Boot keys OK: $keys"
+        SECUREBOOT_KEYS_DIR="$keys"
+        export SECUREBOOT_KEYS_DIR
+        return 0
+    fi
+    if [[ "$SECURE_BOOT" == "1" || "$SECURE_BOOT" == "require" ]]; then
+        die "Secure Boot required but keys missing (mount USB at /run/media/*/secureboot-keys with voidling-sb.key + voidling-sb.crt)"
+    fi
+    # auto + firmware SB on → fail closed before wipe
+    if vsb_firmware_secure_boot_enabled; then
+        die "firmware Secure Boot is enabled but keys are missing; mount signing keys or choose Secure Boot off"
+    fi
+    log "warning: Secure Boot keys not found; ESP will be left unsigned"
+}
+
+collect_identity() {
+    VOIDLING_HOSTNAME="$(prompt_text "Hostname" "$VOIDLING_HOSTNAME")"
+    VOIDLING_USER="$(prompt_text "Admin username (wheel)" "$VOIDLING_USER")"
+    VOIDLING_LOCALE="$(prompt_text "Locale (empty = C / C.UTF-8 default)" \
+        "${VOIDLING_LOCALE:-}")"
+}
+
+write_luks_passphrase_file() {
+    local pass
+    pass="$(prompt_password_twice "LUKS passphrase")"
+    LUKS_PASS_FILE="$TMP_DIR/luks-passphrase"
+    printf '%s' "$pass" >"$LUKS_PASS_FILE"
+    chmod 600 -- "$LUKS_PASS_FILE"
+    # Keep TMP_DIR until after exec would remove it — so for real runs we
+    # move the file outside the cleaned temp dir.
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        local keep
+        keep="$(mktemp -- "${TMPDIR:-/tmp}/voidling-luks-pass.XXXXXX")"
+        cp -a -- "$LUKS_PASS_FILE" "$keep"
+        chmod 600 -- "$keep"
+        LUKS_PASS_FILE="$keep"
+        log "LUKS passphrase stored at $LUKS_PASS_FILE (remove after install)"
+    fi
+}
+
 collect_choices() {
-    local pick dest_default wipe
+    local pick wipe dest_default
     dest_default="${OUT_DIR:-$ROOT_DIR/out}/install-staging"
 
-    log "Voidling installer (prototype)"
+    log "Voidling installer"
     log "Directory/sysroot mode is the default (no disks are touched)."
     log "Disk mode partitions and formats the device after acknowledgment."
     log "For a noninteractive run, use: bash -- $INSTALLER"
 
-    if [[ "$VARIANT" == "plasma" ]]; then
-        pick="$(menu_pick "Image variant" "plasma (KDE Plasma)" "minimal (no DE)")"
-    else
-        pick="$(menu_pick "Image variant" "minimal (no DE)" "plasma (KDE Plasma)")"
-    fi
+    pick="$(menu_pick "Image variant" \
+        "minimal (no DE)" \
+        "plasma (KDE Plasma)" \
+        "plasma-fenestration (Plasma + Windows/gaming stack)")"
     case "$pick" in
-        minimal*)
-            VARIANT="minimal"
-            ;;
-        plasma*)
-            VARIANT="plasma"
-            ;;
-        *)
-            die "unexpected variant pick: $pick"
-            ;;
+        minimal*) VARIANT="minimal" ;;
+        plasma-fenestration*) VARIANT="plasma-fenestration" ;;
+        plasma*) VARIANT="plasma" ;;
+        *) die "unexpected variant pick: $pick" ;;
     esac
 
-    pick="$(menu_pick "Root filesystem" "zfs" "btrfs")"
+    pick="$(menu_pick "Root filesystem" \
+        "auto (ZFS if tools present on medium, else Btrfs; shipped ISOs → Btrfs)" \
+        "btrfs" \
+        "zfs")"
     case "$pick" in
-        btrfs | zfs)
-            FILESYSTEM="$pick"
-            ;;
-        *)
-            die "unexpected filesystem pick: $pick"
-            ;;
+        auto*) FILESYSTEM="auto" ;;
+        btrfs) FILESYSTEM="btrfs" ;;
+        zfs) FILESYSTEM="zfs" ;;
+        *) die "unexpected filesystem pick: $pick" ;;
     esac
 
-    pick="$(menu_pick "Install target" "directory / sysroot (safe default)" "whole disk (WIPES the device)")"
+    pick="$(menu_pick "Install target" \
+        "directory / sysroot (safe default)" \
+        "whole disk (WIPES the device)")"
     case "$pick" in
-        directory*)
-            TARGET="dir"
-            ;;
-        disk*)
-            TARGET="disk"
-            ;;
-        *)
-            die "unexpected target pick: $pick"
-            ;;
+        directory*) TARGET="dir" ;;
+        disk* | whole*) TARGET="disk" ;;
+        *) die "unexpected target pick: $pick" ;;
     esac
+
+    collect_identity
 
     if [[ "$TARGET" == "dir" ]]; then
-        if [[ "$UI" == "dialog" ]]; then
-            DEST="$(dialog_input "Destination directory" "$dest_default")"
-        else
-            DEST="$(read_line "Destination directory [$dest_default]: ")"
-        fi
-        if [[ -z "$DEST" ]]; then
-            DEST="$dest_default"
-        fi
+        DEST="$(prompt_text "Destination directory" "$dest_default")"
+        LUKS=0
+        LUKS_TPM2=0
+        SWAP=0
     else
-        if [[ "$UI" == "dialog" ]]; then
-            DEST="$(dialog_input "Block device to WIPE (whole disk)" "/dev/disk/by-id/...")"
-        else
-            DEST="$(read_line "Block device to WIPE (whole disk) [/dev/disk/by-id/...]: ")"
-        fi
-        if [[ -z "$DEST" ]]; then
-            die "disk target requires a device path"
-        fi
+        pick_disk_by_id
         log "Type exactly: $WIPE_PHRASE"
-        if [[ "$UI" == "dialog" ]]; then
-            wipe="$(dialog_input "Acknowledge disk mention" "")"
-        else
-            wipe="$(read_line "> ")"
-        fi
+        wipe="$(prompt_text "Acknowledge disk wipe" "")"
         if [[ "$wipe" != "$WIPE_PHRASE" ]]; then
             die "disk acknowledgment does not match"
         fi
         WIPE_ACK=1
+
+        pick="$(menu_pick "Disk encryption (LUKS2)" \
+            "no (plain filesystem)" \
+            "yes (passphrase)" \
+            "yes + TPM2 (clevis; needs WITH_TPM2=1 tree and TPM device)")"
+        case "$pick" in
+            no*)
+                LUKS=0
+                LUKS_TPM2=0
+                ;;
+            yes\ +*)
+                LUKS=1
+                LUKS_TPM2=1
+                ;;
+            yes*)
+                LUKS=1
+                LUKS_TPM2=0
+                ;;
+            *)
+                die "unexpected LUKS pick: $pick"
+                ;;
+        esac
+        if [[ "$LUKS" == "1" ]]; then
+            write_luks_passphrase_file
+            if [[ "$LUKS_TPM2" == "1" ]]; then
+                if ! tree_has_clevis; then
+                    die "TPM2 bind needs clevis in the install tree (compose WITH_TPM2=1); shipped product ISOs are WITH_TPM2=0"
+                fi
+                if ! tpm_device_present; then
+                    die "--luks-tpm2 needs /dev/tpmrm0 (or TPM2TOOLS_TCTI); no TPM visible"
+                fi
+            fi
+        fi
+
+        pick="$(menu_pick "Swapfile on root filesystem" \
+            "no (zram only; default)" \
+            "yes (create /var/swap/swapfile; size from SWAP_SIZE_MIB)")"
+        case "$pick" in
+            no*) SWAP=0 ;;
+            yes*) SWAP=1 ;;
+            *) die "unexpected swap pick: $pick" ;;
+        esac
+
+        pick="$(menu_pick "Root access policy (installed system)" \
+            "locked (default; no root password, admin user in wheel)" \
+            "password (root shares the new admin password)" \
+            "none (no root path; replacement user not in wheel)")"
+        case "$pick" in
+            locked*) ROOT_ACCESS="locked" ;;
+            password*) ROOT_ACCESS="password" ;;
+            none*) ROOT_ACCESS="none" ;;
+            *) die "unexpected root-access pick: $pick" ;;
+        esac
+
+        pick="$(menu_pick "Secure Boot ESP signing" \
+            "auto (sign when firmware SB is on or keys are mounted)" \
+            "require (fail if keys missing)" \
+            "off (leave ESP unsigned)")"
+        case "$pick" in
+            auto*) SECURE_BOOT="auto" ;;
+            require*) SECURE_BOOT="1" ;;
+            off*) SECURE_BOOT="0" ;;
+            *) die "unexpected Secure Boot pick: $pick" ;;
+        esac
+        sb_keys_preflight
     fi
 }
 
-run_installer() {
-    local args
+build_installer_args() {
+    local -a args
     args=(
         --target="$TARGET"
         --dest="$DEST"
         --variant="$VARIANT"
         --filesystem="$FILESYSTEM"
+        --root-access="$ROOT_ACCESS"
     )
     if [[ "$WIPE_ACK" == "1" ]]; then
         args+=(--i-understand-this-wipes-disks)
     fi
+    if [[ "$LUKS" == "1" ]]; then
+        args+=(--luks-passphrase-file="$LUKS_PASS_FILE")
+    fi
+    if [[ "$LUKS_TPM2" == "1" ]]; then
+        args+=(--luks-tpm2)
+    fi
+    if [[ "$SWAP" == "1" ]]; then
+        args+=(--swap)
+    fi
+    printf '%s\0' "${args[@]}"
+}
+
+run_installer() {
+    local -a args
+    local arg
+    args=()
+    while IFS= read -r -d '' arg; do
+        args+=("$arg")
+    done < <(build_installer_args)
 
     log ""
     log "About to run:"
-    log "  bash -- $INSTALLER ${args[*]}"
+    log "  SECURE_BOOT=$SECURE_BOOT VOIDLING_HOSTNAME=$VOIDLING_HOSTNAME VOIDLING_USER=$VOIDLING_USER VOIDLING_LOCALE=${VOIDLING_LOCALE:-} bash -- $INSTALLER ${args[*]}"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf 'SECURE_BOOT=%q\n' "$SECURE_BOOT"
+        printf 'VOIDLING_HOSTNAME=%q\n' "$VOIDLING_HOSTNAME"
+        printf 'VOIDLING_USER=%q\n' "$VOIDLING_USER"
+        printf 'VOIDLING_LOCALE=%q\n' "${VOIDLING_LOCALE:-}"
+        printf 'argv:'
+        printf ' %q' bash -- "$INSTALLER" "${args[@]}"
+        printf '\n'
+        return 0
+    fi
     if ! confirm_yes "Run the installer with these settings?"; then
         die "aborted"
     fi
 
-    exec bash -- "$INSTALLER" "${args[@]}"
+    if [[ -n "${SECUREBOOT_KEYS_DIR:-}" ]]; then
+        export SECUREBOOT_KEYS_DIR
+    fi
+    exec env \
+        SECURE_BOOT="$SECURE_BOOT" \
+        VOIDLING_HOSTNAME="$VOIDLING_HOSTNAME" \
+        VOIDLING_USER="$VOIDLING_USER" \
+        VOIDLING_LOCALE="${VOIDLING_LOCALE:-}" \
+        bash -- "$INSTALLER" "${args[@]}"
 }
 
 main() {
@@ -315,11 +580,12 @@ main() {
     UI="${VOIDLING_INSTALLER_UI:-auto}"
     parse_args "$@"
 
-    if [[ ! -t 0 ]]; then
+    if [[ ! -t 0 && "$DRY_RUN" -eq 0 ]]; then
         die "stdin is not a tty; use install-voidling.sh for noninteractive installs"
     fi
 
     [[ -f "$INSTALLER" ]] || die "missing $INSTALLER"
+    [[ -f "$SB_LIB" ]] || die "missing $SB_LIB"
     resolve_ui
     collect_choices
     run_installer

@@ -191,7 +191,7 @@ Live kernel arguments:
 
 `rd.live.image rd.overlay rd.live.dir=live rd.live.squashimg=filesystem.squashfs root=live:CDLABEL=VOIDLING console=tty0 console=ttyS0 zswap.enabled=0 rw`
 
-A sealed compose tree has `/usr/etc` and no `/etc`. `build-iso.sh` copies `/usr/etc` → `/etc` for the squashfs only, then removes that temporary `/etc` so the compose tree stays sealed.
+A sealed compose tree has `/usr/etc` and no `/etc`. `build-iso.sh` stages a copy of the rootfs under `out/tmp`, restores `/usr/etc` → `/etc` on that copy for squashfs only, and leaves the compose tree untouched.
 
 The live squashfs also ships the installer (`voidling-installer`, `install-voidling`) plus `tooling/{installer,snapshots,ostree,boot,firstboot}` under `/usr/lib/voidling`. Those copies are removed from the compose tree after packing. Live defaults: `VARIANT` from the ISO variant, `FILESYSTEM=auto` (Btrfs on the shipped `WITH_ZFS=0` ISOs), staging under `/var/tmp/voidling`. Live root has no password; `voidling`/`voidling` is the lab user. `build-iso.sh --secure-boot` signs the chain (`tooling/boot/SECURE-BOOT.md`); `SQUASHFS_COMP=zstd` is available. `clean-out.sh` prunes OSTree history and stale `out/tmp`.
 

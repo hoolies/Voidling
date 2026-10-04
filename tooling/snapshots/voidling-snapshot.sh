@@ -16,12 +16,14 @@ readonly DEFAULT_BTRFS_SUBVOL="@var"
 readonly DEFAULT_BTRFS_SNAPDIR="@snapshots"
 
 readonly -a VALID_TYPE_LIST=(
+    baseline
     pre-upgrade
     pre-fenestration-change
     pre-sourcing-into-generation
     manual-user
 )
 readonly -a AUTOMATIC_TYPE_LIST=(
+    baseline
     pre-upgrade
     pre-fenestration-change
     pre-sourcing-into-generation
@@ -51,7 +53,7 @@ Mandatory arguments to long options are mandatory for short options too.
       --btrfs-snapdir NAME snapshot subvolume dir (default: @snapshots)
   -h, --help               display this help and exit
 
-Types: pre-upgrade, pre-fenestration-change,
+Types: baseline, pre-upgrade, pre-fenestration-change,
        pre-sourcing-into-generation, manual-user
 
 Naming: voidling_<type>_<UTC-YYYYMMDDTHHMMSSZ>

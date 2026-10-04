@@ -16,12 +16,18 @@ readonly ROOT_DIR
 readonly -a UNIT_TESTS=(
     tooling/boot/test-esp-chain.sh
     tooling/boot/test-ostree-upgrade-rollback-smoke.sh
+    tooling/boot/test-secureboot-lib.sh
     tooling/compose/test-setup-zram.sh
     tooling/compose/test-zram-boot-marker.sh
     tooling/firstboot/test-configure-system.sh
     tooling/firstboot/test-set-credentials.sh
+    tooling/firstboot/test-setup-flatpak-fenestration.sh
     tooling/initramfs/test-voidling-ostree-prepare.sh
+    tooling/installer/test-baseline-failclosed.sh
     tooling/installer/test-install-persistence.sh
+    tooling/installer/test-swap-nocow.sh
+    tooling/installer/test-voidling-installer-argv.sh
+    tooling/ostree/test-deploy-sealed.sh
     tooling/snapshots/test-voidling-snapshot.sh
 )
 
@@ -42,7 +48,8 @@ Mandatory arguments to long options are mandatory for short options too.
       --fix             rewrite files with shfmt -w instead of diffing
   -h, --help            display this help and exit
 
-Scripts: tooling/**/*.sh, overlays/immutable/**/*.sh, overlays/initramfs/**/*.sh
+Scripts: tooling/**/*.sh, tooling/installer/voidling-installer,
+overlays/immutable/**/*.sh, overlays/initramfs/**/*.sh
 (Plasma skel helpers under overlays/plasma are user dotfiles and are skipped.)
 Tests:   ${UNIT_TESTS[*]}
 EOF
@@ -93,7 +100,10 @@ parse_args() {
 }
 
 collect_scripts() {
-    find tooling overlays/immutable overlays/initramfs -type f -name '*.sh' | sort
+    {
+        find tooling overlays/immutable overlays/initramfs -type f -name '*.sh'
+        printf '%s\n' tooling/installer/voidling-installer
+    } | sort -u
 }
 
 run_lint() {

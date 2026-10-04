@@ -19,6 +19,9 @@ export LC_ALL=C
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly ROOT_DIR
 
+# shellcheck source=../boot/voidling-secureboot-lib.sh
+. "${ROOT_DIR}/tooling/boot/voidling-secureboot-lib.sh"
+
 readonly DEFAULT_VARIANT="minimal"
 readonly DEFAULT_ISO_LABEL="VOIDLING"
 readonly LIVE_DIR="live"
@@ -33,6 +36,7 @@ WORK_DIR=""
 MOUNTS=()
 SQUASH_ETC_RESTORED=0
 LIVE_INSTALLER_INSTALLED=0
+STAGED_ROOTFS=""
 SECURE_BOOT="${SECURE_BOOT:-0}"
 SECURE_BOOT_GPG="${SECURE_BOOT_GPG:-1}"
 SB_KEYS_DIR=""
@@ -47,9 +51,12 @@ Build a UEFI-bootable hybrid ISO from a Voidling bootable rootfs.
 
 Mandatory arguments to long options are mandatory for short options too.
 
-  -V, --variant=NAME    product variant: minimal or plasma (default: minimal)
+  -V, --variant=NAME    product variant: minimal, plasma, or
+                        plasma-fenestration (default: minimal)
   -r, --rootfs DIR      rootfs directory (default:
-                        OUT_DIR/rootfs-ARCH-LIBC-VARIANT)
+                        OUT_DIR/rootfs-ARCH-LIBC-VARIANT; plasma and
+                        plasma-fenestration default to the minimal live
+                        rootfs unless --rootfs is set)
       --initrd FILE     live initrd to pack as /boot/initrd (default:
                         OUT_DIR/initramfs-ARCH-LIBC-VARIANT-live.img)
   -o, --output FILE     ISO output path (default:
@@ -92,7 +99,9 @@ Environment:
   OUT_DIR        output directory (default: <repo>/out)
   TARGET_ARCH    architecture (default: x86_64)
   TARGET_LIBC    libc (default: glibc)
-  VARIANT        product variant: minimal or plasma (default: minimal)
+  VARIANT        product variant: minimal, plasma, or plasma-fenestration
+                 (default: minimal). Plasma ISOs boot a minimal live
+                 environment and install the desktop from ostree-repo/.
   LIVE_INITRD    same as --initrd
   SQUASHFS_FILE  existing squashfs to copy instead of packing the rootfs
   SQUASHFS_COMP  mksquashfs compressor: xz (default, smallest) or zstd
@@ -284,61 +293,27 @@ resolve_defaults() {
 # --- Secure Boot ------------------------------------------------------------
 
 sb_tool() {
-    local name="$1"
-    if [[ -n "$SB_TOOLS" && -x "$SB_TOOLS/$name" ]]; then
-        printf '%s\n' "$SB_TOOLS/$name"
-        return 0
-    fi
-    command -v "$name" >/dev/null 2>&1 || die "Secure Boot tool missing: $name (run tooling/boot/ensure-secureboot-tools.sh)"
-    command -v "$name"
+    vsb_tool "$1"
 }
 
 prepare_secure_boot() {
     if [[ "$SECURE_BOOT" != "1" ]]; then
         return 0
     fi
-    log "==> Secure Boot: preparing keys and tools"
-    SB_TOOLS="$(bash -- "$ROOT_DIR/tooling/boot/ensure-secureboot-tools.sh")"
-    SB_KEYS_DIR="$(SECUREBOOT_TOOLS="$SB_TOOLS" bash -- "$ROOT_DIR/tooling/boot/ensure-secureboot-keys.sh")"
-    [[ -f "$SB_KEYS_DIR/voidling-sb.key" && -f "$SB_KEYS_DIR/voidling-sb.crt" ]] ||
-        die "Secure Boot key material missing under $SB_KEYS_DIR"
-    if [[ "$SECURE_BOOT_GPG" == "1" ]]; then
-        need gpg
-        SB_GPG_HOME="$SB_KEYS_DIR/gnupg"
-        [[ -f "$SB_KEYS_DIR/voidling-grub.gpg" ]] || die "GRUB GPG public key missing: $SB_KEYS_DIR/voidling-grub.gpg"
-    fi
+    vsb_prepare "$ROOT_DIR" 1
     need grub-mkstandalone
     need xorriso
     need mkfs.vfat
-    sb_tool sbsign >/dev/null
-    sb_tool sbverify >/dev/null
+    vsb_tool sbsign >/dev/null
+    vsb_tool sbverify >/dev/null
 }
 
 sb_sign_pe() {
-    # Authenticode-sign a PE/EFI binary in place with the Voidling key.
-    local file="$1" sbsign sbverify
-    sbsign="$(sb_tool sbsign)"
-    sbverify="$(sb_tool sbverify)"
-    "$sbsign" --key "$SB_KEYS_DIR/voidling-sb.key" --cert "$SB_KEYS_DIR/voidling-sb.crt" \
-        --output "$file.signed" "$file" >/dev/null 2>&1 ||
-        die "sbsign failed for $file"
-    mv -f -- "$file.signed" "$file"
-    "$sbverify" --cert "$SB_KEYS_DIR/voidling-sb.crt" "$file" >/dev/null 2>&1 ||
-        die "sbverify failed for $file"
-    log "    signed (sbsign): ${file##*/}"
+    vsb_sign_pe "$1" "$SB_KEYS_DIR"
 }
 
 sb_gpg_sign() {
-    # Detached OpenPGP signature next to FILE (FILE.sig) for GRUB's pgp verifier.
-    local file="$1"
-    if [[ "$SECURE_BOOT" != "1" || "$SECURE_BOOT_GPG" != "1" ]]; then
-        return 0
-    fi
-    rm -f -- "$file.sig"
-    gpg --homedir "$SB_GPG_HOME" --batch --quiet --yes --detach-sign \
-        --output "$file.sig" "$file" ||
-        die "gpg detach-sign failed for $file"
-    log "    signed (gpg):    ${file##*/}.sig"
+    vsb_gpg_sign "$1" "${SB_GPG_HOME:-}"
 }
 
 write_sbat_csv() {
@@ -761,6 +736,10 @@ cleanup() {
     fi
     remove_temp_etc
     remove_live_installer
+    if [[ -n "${STAGED_ROOTFS:-}" && -d "$STAGED_ROOTFS" ]]; then
+        rm -rf -- "$STAGED_ROOTFS"
+        STAGED_ROOTFS=""
+    fi
     if [[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]]; then
         rm -rf -- "$WORK_DIR"
         WORK_DIR=""
@@ -876,6 +855,51 @@ copy_ostree_repo_payload() {
     cp -a -- "$repo" "$iso_root/ostree-repo"
 }
 
+# Optional offline Fenestration Flatpak bundles (prepare-flatpak-cache.sh).
+# PACK_FLATPAK_CACHE=1 forces a die if missing; auto packs when the dir exists.
+resolve_flatpak_cache_dir() {
+    local cache
+    cache="${VOIDLING_FLATPAK_CACHE:-$OUT_DIR/flatpak-cache}"
+    case "${PACK_FLATPAK_CACHE:-auto}" in
+        0 | no | false | NO | FALSE)
+            printf '%s\n' ""
+            return 0
+            ;;
+        1 | yes | true | YES | TRUE)
+            [[ -d "$cache" ]] || die "PACK_FLATPAK_CACHE=1 but missing $cache (run prepare-flatpak-cache.sh)"
+            printf '%s\n' "$cache"
+            ;;
+        auto | '')
+            if [[ -d "$cache" ]]; then
+                printf '%s\n' "$cache"
+            else
+                printf '%s\n' ""
+            fi
+            ;;
+        *) die "PACK_FLATPAK_CACHE must be auto, 1, or 0 (got: ${PACK_FLATPAK_CACHE})" ;;
+    esac
+}
+
+stage_flatpak_cache_into_rootfs() {
+    local rootfs="$1" cache
+    cache="$(resolve_flatpak_cache_dir)"
+    [[ -n "$cache" ]] || return 0
+    log "==> staging Fenestration Flatpak cache into live rootfs ($cache)"
+    mkdir -p -- "$rootfs/usr/share/voidling/flatpak-cache"
+    cp -a -- "$cache"/. "$rootfs/usr/share/voidling/flatpak-cache"/
+}
+
+copy_flatpak_cache_payload() {
+    local iso_root="$1" cache dest
+    cache="$(resolve_flatpak_cache_dir)"
+    [[ -n "$cache" ]] || return 0
+    dest="$iso_root/flatpak-cache"
+    log "==> packing Fenestration Flatpak cache onto ISO ($cache)"
+    rm -rf -- "$dest"
+    mkdir -p -- "$dest"
+    cp -a -- "$cache"/. "$dest"/
+}
+
 copy_boot_files() {
     local iso_boot="$1"
     mkdir -p -- "$iso_boot"
@@ -891,6 +915,20 @@ copy_boot_files() {
             sb_gpg_sign "$iso_boot/initrd"
         fi
     fi
+}
+
+stage_rootfs_for_squashfs() {
+    # Copy the compose tree so live mutations never dirty out/rootfs-*.
+    local src staged
+    src="$ROOTFS_DIR"
+    [[ -d "$src" ]] || die "ROOTFS_DIR is not a directory: $src"
+    staged="$(mktemp -d -- "${TMPDIR}/voidling-squash-root.XXXXXX")"
+    log "==> staging squashfs rootfs copy (compose tree left untouched)"
+    log "    from: $src"
+    log "    to:   $staged"
+    cp -a -- "$src"/. "$staged"/
+    STAGED_ROOTFS="$staged"
+    ROOTFS_DIR="$staged"
 }
 
 restore_etc_for_squashfs() {
@@ -1038,10 +1076,13 @@ maybe_squashfs() {
         cp -a -- "$SQUASHFS_FILE" "$dest"
         return 0
     fi
+    stage_rootfs_for_squashfs
     restore_etc_for_squashfs
     enable_live_serial_getty
     ensure_live_mountpoints
     install_live_installer
+    # Stage offline Flatpak cache into the squashfs copy only (never compose).
+    stage_flatpak_cache_into_rootfs "$ROOTFS_DIR"
     log "==> packing squashfs payload"
     # Keep empty proc/sys/dev/run/tmp directories. Excluding those names
     # drops the mount points and runit cannot mount /proc after switch_root.
@@ -1263,6 +1304,7 @@ main() {
     write_grub_cfg "$ISO_WORK/boot/grub/grub.cfg"
     write_iso_readme "$ISO_WORK/README.voidling.txt"
     maybe_squashfs "$ISO_WORK/$LIVE_DIR/$LIVE_SQUASH"
+    copy_flatpak_cache_payload "$ISO_WORK"
     build_iso
 
     log "==> done"

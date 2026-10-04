@@ -14,7 +14,8 @@ readonly ROOT_DIR
 # Void's smallest official meta that still includes runit + POSIX userland.
 # runit-void is already a dependency of base-container.
 readonly CONTAINER_PKGS="base-container ca-certificates"
-readonly BOOTABLE_PKGS="base-minimal runit-void ca-certificates linux grub-x86_64-efi dracut ostree e2fsprogs btrfs-progs iproute2 cryptsetup openssl shadow sudo"
+# dialog: live guided installer (voidling-installer) prefers it over numbered menus.
+readonly BOOTABLE_PKGS="base-minimal runit-void ca-certificates linux grub-x86_64-efi dracut ostree e2fsprogs btrfs-progs iproute2 cryptsetup openssl shadow sudo dialog"
 readonly ZFS_BOOT_PKGS="zfs"
 # TPM2 auto-unlock of a LUKS root (clevis pulls tpm2-tools, jose, luksmeta).
 readonly TPM2_BOOT_PKGS="clevis"

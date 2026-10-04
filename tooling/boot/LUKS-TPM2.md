@@ -29,6 +29,9 @@ sudo install-voidling --target=disk --i-understand-this-wipes-disks \
 
 Requirements on the installing host: `clevis` in PATH (the live ISO is the
 minimal tree, so it must be a `WITH_TPM2=1` compose) and `/dev/tpmrm0`.
+Shipped product ISOs stay `WITH_TPM2=0`; `voidling-installer` only offers
+TPM2 when clevis is in the tree and a TPM device (or `TPM2TOOLS_TCTI`) is
+visible.
 The installer refuses `--luks-tpm2` otherwise.
 
 ## Policy
@@ -44,10 +47,20 @@ The installer refuses `--luks-tpm2` otherwise.
   clevis in the initramfs falls back to the passphrase prompt (nothing
   breaks, the second prompt simply returns).
 
-## Testing status
+## Testing
 
-Not smoke-tested on this host: it needs a `WITH_TPM2=1` recompose plus a
-QEMU TPM (`swtpm` with `-chardev socket,id=chrtpm,path=… -tpmdev
-emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0`). The wiring
-(package, dracut snippet, installer bind, plan recording) is linted and
-unit-checked; the runtime path is upstream clevis behaviour.
+```sh
+# Empty PCR policy (host bind + same swtpm state in QEMU):
+sudo bash tooling/image/test-luks-tpm2-boot.sh
+
+# Production-shaped PCR 7: bind inside the guest, then reboot:
+sudo bash tooling/image/test-luks-tpm2-pcr7-guest.sh
+
+# Suite (skip with --skip-luks-tpm2 / --skip-luks-tpm2-pcr7):
+sudo bash tooling/image/smoke-all.sh
+```
+
+`test-luks-tpm2-boot.sh` uses an empty PCR list so host-side clevis bind and
+guest unlock share one swtpm state. `test-luks-tpm2-pcr7-guest.sh` binds PCR
+7 **in the guest** (correct for Secure Boot / firmware PCR interaction).
+`boot-qemu.sh --tpm` attaches `tpm-tis`.

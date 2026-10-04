@@ -44,7 +44,8 @@ When `--luks-passphrase-file` is used:
 
 1. ESP early config runs `cryptomount -u <LUKS_UUID>` (GRUB passphrase #1).
 2. Kernel args include `rd.luks.uuid=…`; dracut/cryptsetup may prompt again
-   (passphrase #2) unless a keyfile/TPM unlock is added later.
+   (passphrase #2) unless `--luks-tpm2` sealed a clevis TPM2 slot
+   (`tooling/boot/LUKS-TPM2.md`).
 3. Keyslots: PBKDF2 (500k iterations) for GRUB, plus an argon2id slot with the
    same passphrase for cryptsetup.
 

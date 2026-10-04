@@ -78,11 +78,12 @@ disk swap.
 
 | Flag | Installer | `configure-system.sh` | Dir mode | Disk apply (`--i-understand-this-wipes-disks`) |
 |------|-----------|------------------------|----------|-----------------------------------------------|
-| `--swap` | records `SWAP=1` in `plan.env` | writes `etc/voidling/storage-plan.env` | plan only | plan only (no swap partition yet) |
+| `--swap` | records `SWAP=1` in `plan.env` | writes `etc/voidling/storage-plan.env` | plan only | installer creates `/var/swap/swapfile` (`SWAP_SIZE_MIB`) |
 | `--luks` | records `LUKS=1` in `plan.env` | same file | plan only | LUKS2 on root part when `--luks-passphrase-file` is set; `crypttab` + `rd.luks.uuid` karg |
 
-Still not implemented here: disk swap partition/file, fstab swap lines, TPM,
-or a production TUI installer.
+Still not implemented here: disk swap partition/file, fstab swap lines, or a
+guided TUI (`voidling-installer`). TPM2 LUKS bind is an **installer** concern
+(`--luks-tpm2`; see `tooling/boot/LUKS-TPM2.md`), not firstboot.
 
 zram swap is separate and on by default (`voidling-zram`). `--swap` does
 not turn it on or off.

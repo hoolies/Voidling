@@ -42,10 +42,10 @@ This MVP is the smallest artifact set that proves Voidling’s core promise:
 - **@home fstab:** Disk Btrfs installs mount `subvol=@home` at `/home`.
 - **LUKS hardening:** PBKDF2 (GRUB) + argon2id second slot; crypttab in deployment `/etc`; kargs persisted for upgrades.
 - **OSTree signing:** `ensure-signing-keys.sh` (base64 ed25519); `commit-rootfs.sh` signs by default when the key exists (`OSTREE_SIGN=auto|1|0`) and verifies the commit. The public key ships in the tree (`/usr/share/ostree/trusted.ed25519.d/voidling.ed25519`); `deploy-sysroot.sh` pulls with `--sign-verify=ed25519=inline:…` and `voidling-upgrade` pins `verification-ed25519-key` on the remote, refusing unverified pulls.
-- **Secure Boot (live ISO, on/off):** `build-iso.sh --secure-boot` → `grub-mkstandalone --disable-shim-lock --sbat --pubkey`, `sbsign` on BOOTX64.EFI + vmlinuz, GPG `.sig` for kernel/initrd/grub.cfg, enrollment files in `EFI/voidling/keys`. Smoke: `tooling/image/test-secureboot-iso.sh` (enrolled OVMF prints `Secure boot enabled`). Docs: `tooling/boot/SECURE-BOOT.md`.
-- **LUKS single prompt (opt-in):** `WITH_TPM2=1` compose + `install-voidling --luks-tpm2` (clevis, PCR 7). Docs: `tooling/boot/LUKS-TPM2.md`. Not QEMU-smoked yet (needs swtpm).
+- **Secure Boot (opt-in):** live ISO (`build-iso.sh --secure-boot`), compose kernel signing (`SECURE_BOOT=1`), installed ESP signing when keys are on the installing host. Smoke: `tooling/image/test-secureboot-iso.sh`. Docs: `tooling/boot/SECURE-BOOT.md`.
+- **LUKS single prompt (opt-in):** `WITH_TPM2=1` compose + `install-voidling --luks-tpm2` (clevis, PCR 7). QEMU smoke: `tooling/image/test-luks-tpm2-boot.sh` (swtpm). Docs: `tooling/boot/LUKS-TPM2.md`.
 - **Live initrd:** zfs driver only when the tree ships it; no dracut `FAILED` on Btrfs-only trees.
-- **CI gate:** `tooling/ci.sh` (shellcheck -x, shfmt, 9 unit tests) + `.github/workflows/ci.yml`.
+- **CI gate:** `tooling/ci.sh` on Void (`ghcr.io/void-linux/void-glibc-full`): shellcheck -x, shfmt, unit tests including sealed deploy.
 - **Housekeeping:** `tooling/image/clean-out.sh` (dry run default; `--apply` prunes OSTree history and stale `out/tmp`).
 - **zswap:** kargs + blacklist + `setup-zram` forces `/sys/module/zswap/parameters/enabled` to `N` (built-in zswap still logs “loaded using pool”).
 - **Product CLIs in tree:** `voidling-upgrade` / `voidling-rollback` / `voidling-snapshot` / `voidling-set-credentials` under `/usr` via `apply-product-clis.sh`.
@@ -73,4 +73,4 @@ The flat ext4 qcow2 prototype **omits** the OSTree dracut module. The live ISO *
 
 - OSTree ZFS qcow2 is out of scope on this host (no host ZFS userspace by choice).
 - Disk swap partitions and a production installer TUI remain future work.
-- ARM back-burner. Git repo is yours to create.
+- ARM back-burner.

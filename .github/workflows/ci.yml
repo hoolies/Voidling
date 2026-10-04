@@ -7,15 +7,22 @@ on:
 jobs:
   lint-and-unit:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/void-linux/void-glibc-full:latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install shellcheck and shfmt
+      - name: Prepare Void container
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck openssl
+          mkdir -p /etc/xbps.d
+          cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
+          xbps-install -Syu xbps
+          xbps-install -y bash git curl shellcheck go ostree openssl
+          # shfmt is not always packaged; install a pinned binary.
           SHFMT_VERSION=v3.8.0
           curl -fsSL -o /usr/local/bin/shfmt \
             "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
-          sudo chmod 0755 /usr/local/bin/shfmt
+          chmod 0755 /usr/local/bin/shfmt
+      - uses: actions/checkout@v4
       - name: Lint and unit tests
         run: bash tooling/ci.sh
+        env:
+          VOIDLING_OSTREE_RELAX_SPACE: "1"
